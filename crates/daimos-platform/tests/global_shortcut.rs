@@ -1,5 +1,8 @@
 //! Registers a real binding through the Tauri plugin, asserts it, and unregisters it.
 //! Needs a display on Linux (Xvfb in CI), so it skips without one.
+//!
+//! One test, one app: the OS allows a single hotkey manager per process (macOS refuses a
+//! second one), and tests of a file run in parallel threads of one process.
 
 use daimos_platform::hotkey::{Binding, GlobalShortcutHotkey, Hotkey, HotkeyError};
 use tauri_plugin_global_shortcut::GlobalShortcutExt;
@@ -9,7 +12,7 @@ fn has_display() -> bool {
 }
 
 #[test]
-fn registers_and_unregisters_a_binding() {
+fn registers_unregisters_and_rejects_an_invalid_binding() {
     if !has_display() {
         eprintln!("no DISPLAY, skipping");
         return;
@@ -28,15 +31,7 @@ fn registers_and_unregisters_a_binding() {
 
     hotkey.unregister(&registration).expect("unregister");
     assert!(!handle.global_shortcut().is_registered("Ctrl+Alt+Shift+F11"));
-}
 
-#[test]
-fn an_invalid_binding_is_a_typed_error() {
-    let app = tauri::test::mock_builder()
-        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .build(tauri::test::mock_context(tauri::test::noop_assets()))
-        .expect("mock app");
-    let hotkey = GlobalShortcutHotkey::new(app.handle().clone());
     let err = hotkey.register(&Binding::new("NotAKey+Banana")).unwrap_err();
     assert!(
         matches!(err, HotkeyError::Invalid { binding, .. } if binding.as_str() == "NotAKey+Banana")
