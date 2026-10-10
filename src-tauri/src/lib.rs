@@ -18,7 +18,11 @@ pub fn run() {
     // Process start to hotkey ready is a budget of the product spec (500 ms).
     let started = std::time::Instant::now();
     let builder = bindings::builder();
-    tauri::Builder::default()
+    let tauri_builder = tauri::Builder::default();
+    // The panel manager the NSPanel conversion looks up; without it the app aborts at launch.
+    #[cfg(target_os = "macos")]
+    let tauri_builder = tauri_builder.plugin(tauri_nspanel::init());
+    tauri_builder
         // First, as the plugin requires. Starting Daimos again shows the running one.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| window_control::show(app)))
         .plugin(tauri_plugin_log::Builder::new().level(log::LevelFilter::Info).build())
