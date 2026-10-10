@@ -26,6 +26,11 @@ log = "0.4.34"
 tauri-plugin-log = "2.10.1"
 tauri-plugin-autostart = "2.7.0"
 
+# The NSPanel conversion (tauri-nspanel) needs Tauri's private macOS API; tauri-build requires the
+# feature and `macOSPrivateApi` in tauri.macos.conf.json to agree.
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+
 [features]
 default = ["layer-shell"]
 # Overlay window on Wayland compositors with wlr-layer-shell; needs libgtk-layer-shell-dev.

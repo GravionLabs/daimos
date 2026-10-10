@@ -16,6 +16,10 @@ pub enum WindowMode {
 
 /// Prepares the window once, right after it was created and before it is first mapped.
 pub fn init_window<R: Runtime>(window: &WebviewWindow<R>) -> WindowMode {
+    #[cfg(target_os = "macos")]
+    if let Err(error) = crate::macos::convert(window) {
+        log::warn!("cannot turn the window into a panel: {error}");
+    }
     #[cfg(all(target_os = "linux", feature = "layer-shell"))]
     return layer_shell::init(window);
     #[cfg(not(all(target_os = "linux", feature = "layer-shell")))]
@@ -34,7 +38,11 @@ pub(crate) fn previous_window() -> Option<PreviousWindow> {
 }
 
 /// Called right after the window was shown (activation policy, foreground, window class).
-pub(crate) fn after_show<R: Runtime>(window: &WebviewWindow<R>) {
+/// Returns `true` when the platform already gave the window the keyboard focus, so the caller
+/// must not call `set_focus` (on macOS that activates the whole application).
+pub(crate) fn after_show<R: Runtime>(window: &WebviewWindow<R>) -> bool {
+    #[cfg(target_os = "macos")]
+    return crate::macos::show_and_make_key(window.app_handle(), window.label());
     #[cfg(windows)]
     if let Ok(hwnd) = window.hwnd() {
         // The raw handle type of Tauri's `windows` dependency and ours are the same struct.
@@ -44,8 +52,13 @@ pub(crate) fn after_show<R: Runtime>(window: &WebviewWindow<R>) {
             log::warn!("Windows did not give the foreground to the window");
         }
     }
-    #[cfg(not(windows))]
-    let _ = window;
+    #[cfg(windows)]
+    return true;
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = window;
+        false
+    }
 }
 
 #[cfg(all(target_os = "linux", feature = "layer-shell"))]

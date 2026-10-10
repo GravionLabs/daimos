@@ -32,6 +32,9 @@ tokio = { version = "1.53.2", features = ["rt", "sync", "time", "macros"] }
 [target."cfg(windows)".dependencies]
 windows = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri-nspanel = "2.1"
+
 [features]
 # wlr-layer-shell overlay on Wayland; needs libgtk-layer-shell-dev at build time (see README).
 default = ["layer-shell"]

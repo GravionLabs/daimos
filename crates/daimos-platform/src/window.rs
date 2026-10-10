@@ -91,8 +91,8 @@ impl<R: Runtime> WindowHost for TauriWindowHost<R> {
         if let Err(error) = window.show() {
             log::warn!("cannot show the window: {error}");
         }
-        crate::platform::after_show(&window);
-        if let Err(error) = window.set_focus() {
+        let focused = crate::platform::after_show(&window);
+        if !focused && let Err(error) = window.set_focus() {
             log::warn!("cannot focus the window: {error}");
         }
     }
