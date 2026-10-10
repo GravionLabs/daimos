@@ -27,11 +27,26 @@ pub fn init_window<R: Runtime>(window: &WebviewWindow<R>) -> WindowMode {
 
 /// The window that is active right now, called before the Daimos window is shown.
 pub(crate) fn previous_window() -> Option<PreviousWindow> {
+    #[cfg(windows)]
+    return crate::windows::foreground();
+    #[cfg(not(windows))]
     None
 }
 
 /// Called right after the window was shown (activation policy, foreground, window class).
-pub(crate) fn after_show<R: Runtime>(_window: &WebviewWindow<R>) {}
+pub(crate) fn after_show<R: Runtime>(window: &WebviewWindow<R>) {
+    #[cfg(windows)]
+    if let Ok(hwnd) = window.hwnd() {
+        // The raw handle type of Tauri's `windows` dependency and ours are the same struct.
+        let hwnd = windows::Win32::Foundation::HWND(hwnd.0);
+        crate::windows::apply_palette_style(hwnd);
+        if !crate::windows::take_foreground(hwnd) {
+            log::warn!("Windows did not give the foreground to the window");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = window;
+}
 
 #[cfg(all(target_os = "linux", feature = "layer-shell"))]
 mod layer_shell {
