@@ -197,9 +197,11 @@ pub enum ClientError {
 
 /// Sends one request and waits for the answer.
 pub fn send(endpoint: &Endpoint, request: &Request) -> Result<Response, ClientError> {
+    // Whatever stops the connect (no file, no listener, a missing directory) means nobody is
+    // there to talk to; only a permission problem is worth reporting as such.
     let connection = Stream::connect(endpoint.name()?).map_err(|error| match error.kind() {
-        io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => ClientError::NotRunning,
-        _ => ClientError::Io(error),
+        io::ErrorKind::PermissionDenied => ClientError::Io(error),
+        _ => ClientError::NotRunning,
     })?;
     let mut reader = BufReader::new(connection);
     let mut out = serde_json::to_vec(request).expect("request serializes");

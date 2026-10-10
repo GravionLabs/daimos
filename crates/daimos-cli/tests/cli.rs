@@ -21,7 +21,12 @@ fn daimos(runtime_dir: &std::path::Path, args: &[&str]) -> std::process::Output 
 fn without_a_running_process_the_exit_code_is_2_and_the_message_is_clear() {
     let dir = tempfile::tempdir().unwrap();
     let output = daimos(dir.path(), &["toggle"]);
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(String::from_utf8_lossy(&output.stderr).contains("not running"));
 }
 
