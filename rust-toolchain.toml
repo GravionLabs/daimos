@@ -1,0 +1,4 @@
+# MSRV: the workspace builds with this toolchain on every platform (CI uses the same file).
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]

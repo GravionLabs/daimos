@@ -1,0 +1,52 @@
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --fg: #1c1c1e;
+  --muted: #6e6e73;
+  --accent: #5b6cff;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1e20;
+    --fg: #f2f2f7;
+    --muted: #98989d;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font:
+    16px / 1.4 system-ui,
+    sans-serif;
+}
+
+.palette {
+  padding: 12px;
+}
+
+.search {
+  width: 100%;
+  padding: 12px 14px;
+  border: 0;
+  border-radius: 8px;
+  outline: 2px solid transparent;
+  background: transparent;
+  color: inherit;
+  font-size: 1.25rem;
+}
+
+.search:focus {
+  outline-color: var(--accent);
+}
+
+.search::placeholder {
+  color: var(--muted);
+}

@@ -1,0 +1,6 @@
+node_modules
+target
+*.lock
+pnpm-lock.yaml
+CHANGELOG.md
+src-tauri/gen
