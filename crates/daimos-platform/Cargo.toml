@@ -18,6 +18,7 @@ thiserror = "2.0.21"
 [dev-dependencies]
 tauri = { version = "2.12.2", features = ["test"] }
 tauri-plugin-global-shortcut = "2.4.1"
+tempfile = "3.27.0"
 
 [lints]
 workspace = true
@@ -25,4 +26,10 @@ workspace = true
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "global_shortcuts"] }
 futures-util = "0.3.34"
+gtk-layer-shell = { version = "0.8.2", features = ["v0_6"], optional = true }
 tokio = { version = "1.53.2", features = ["rt", "sync", "time", "macros"] }
+
+[features]
+# wlr-layer-shell overlay on Wayland; needs libgtk-layer-shell-dev at build time (see README).
+default = ["layer-shell"]
+layer-shell = ["dep:gtk-layer-shell"]

@@ -88,6 +88,33 @@ pub fn hotkey_status(status: State<'_, StatusCell>) -> HotkeyStatus {
     status.get()
 }
 
+/// What this system can do, so the settings page can say what is missing and why.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct Capabilities {
+    pub session: String,
+    /// `layer_shell` or `toplevel`.
+    pub window_mode: String,
+    pub hotkey: HotkeyStatus,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn capabilities(
+    status: State<'_, StatusCell>,
+    mode: State<'_, daimos_platform::platform::WindowMode>,
+) -> Capabilities {
+    let hotkey = status.get();
+    Capabilities {
+        session: hotkey.session.clone(),
+        window_mode: match *mode {
+            daimos_platform::platform::WindowMode::LayerShell => "layer_shell",
+            daimos_platform::platform::WindowMode::Toplevel => "toplevel",
+        }
+        .into(),
+        hotkey,
+    }
+}
+
 /// Binds a new hotkey and stores it in the settings. A refused binding changes nothing.
 #[tauri::command]
 #[specta::specta]

@@ -3,6 +3,8 @@
 //! One trait, one backend per window system. X11, Windows, and macOS share the backend built on
 //! `tauri-plugin-global-shortcut`; Wayland has its own (the XDG GlobalShortcuts portal).
 
+#[cfg(target_os = "linux")]
+mod desktop_entry;
 mod global_shortcut;
 #[cfg(target_os = "linux")]
 mod portal;

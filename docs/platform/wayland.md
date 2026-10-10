@@ -18,9 +18,26 @@ settings (`Alt+Space` by default), and listens for `Activated`.
 | sway, niri, other wlroots   | No portal interface. The capability is reported as `unsupported`; use the CLI fallback below.              |
 | GNOME before 48             | No portal interface. Same fallback.                                                                        |
 
+The portal identifies the app by a desktop file named `dev.gravionlabs.daimos.desktop`. Packages ship it;
+when it is missing (a build from a checkout) Daimos writes a user-level one to
+`$XDG_DATA_HOME/applications/` that points at the running executable.
+
 The portal remembers the binding for the application id, so later starts find `toggle` already
 bound and show no dialog. The preferred trigger is only a suggestion: if the user picks another
 one in the dialog, that one wins.
+
+## Window: layer surface or toplevel
+
+| Compositor                  | Window                                                                                          |
+| --------------------------- | ----------------------------------------------------------------------------------------------- |
+| sway, Hyprland, niri, KDE Plasma | A `wlr-layer-shell` surface on the `overlay` layer, no anchor (the compositor centers it), exclusive keyboard interactivity (`gtk-layer-shell`). |
+| GNOME                       | A normal toplevel; GNOME centers new windows itself. GNOME has no layer-shell.                  |
+
+The mode is chosen at start-up (`window mode: …` in the log) and reported to the UI as
+`capabilities.windowMode`. In both modes the window hides when it loses the focus. Limits: a
+layer surface ignores `set_position`, so "center on the monitor with the cursor" is the
+compositor's choice there (it uses the focused output); without the layer-shell library at build
+time (`--no-default-features`) every compositor gets the toplevel.
 
 ## Fallback: bind `daimos toggle` in the compositor
 

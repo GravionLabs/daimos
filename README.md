@@ -12,17 +12,20 @@ Status: M0 Foundation in progress (scaffold, hotkey, resident window).
 Requirements: Rust (the toolchain in `rust-toolchain.toml` is installed by `rustup`), Node.js 24 and
 pnpm (`corepack enable`), and the Tauri prerequisites of your platform.
 
-| Platform | Prerequisites                                                                                                                                           |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Linux    | `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config build-essential` (X11 and Wayland) |
-| Windows  | Microsoft C++ Build Tools and WebView2 (preinstalled on Windows 11)                                                                                     |
-| macOS    | Xcode command line tools (`xcode-select --install`)                                                                                                     |
+| Platform | Prerequisites                                                                                                                                                                  |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Linux    | `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev libgtk-layer-shell-dev librsvg2-dev libssl-dev pkg-config build-essential` (X11 and Wayland) |
+| Windows  | Microsoft C++ Build Tools and WebView2 (preinstalled on Windows 11)                                                                                                            |
+| macOS    | Xcode command line tools (`xcode-select --install`)                                                                                                                            |
 
 ```sh
 pnpm install
 pnpm tauri dev        # the app with a hot-reloading UI
 cargo build --workspace
 ```
+
+Without `libgtk-layer-shell-dev` build with `--no-default-features`: the window is then a plain
+toplevel on every Wayland compositor.
 
 The Rust crates embed `apps/ui/dist`, so build the UI once (`pnpm --filter @daimos/ui build`) before
 a release build of `src-tauri`; `cargo clippy` and `cargo test` work without it.

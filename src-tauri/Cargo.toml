@@ -16,7 +16,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
 daimos-core = { path = "../crates/daimos-core" }
-daimos-platform = { path = "../crates/daimos-platform" }
+daimos-platform = { path = "../crates/daimos-platform", default-features = false }
 specta = { version = "=2.0.0-rc.25", features = ["derive"] }
 specta-typescript = "0.0.12"
 tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
@@ -25,6 +25,11 @@ tauri-plugin-global-shortcut = "2.4.1"
 log = "0.4.34"
 tauri-plugin-log = "2.10.1"
 tauri-plugin-autostart = "2.7.0"
+
+[features]
+default = ["layer-shell"]
+# Overlay window on Wayland compositors with wlr-layer-shell; needs libgtk-layer-shell-dev.
+layer-shell = ["daimos-platform/layer-shell"]
 
 [lints]
 workspace = true

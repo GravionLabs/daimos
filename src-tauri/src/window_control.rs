@@ -3,6 +3,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use daimos_platform::platform::WindowMode;
 use daimos_platform::window::{TauriWindowHost, WindowHost};
 use tauri::{AppHandle, Manager, Wry};
 use tauri_specta::Event;
@@ -36,6 +37,12 @@ impl ShowTimer {
 pub type Host = Arc<dyn WindowHost>;
 
 pub fn install(app: &AppHandle<Wry>) {
+    // Before the window is first mapped: a layer surface cannot be made out of a mapped window.
+    let mode = app
+        .get_webview_window("main")
+        .map_or(WindowMode::Toplevel, |window| daimos_platform::platform::init_window(&window));
+    log::info!("window mode: {mode:?}");
+    app.manage(mode);
     let host: Host = Arc::new(TauriWindowHost::new(app.clone(), "main"));
     app.manage(host);
     app.manage(ShowTimer::default());

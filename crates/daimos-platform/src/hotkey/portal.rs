@@ -19,6 +19,9 @@ use super::{Binding, Hotkey, HotkeyError, Press, PressBus, Registration};
 /// Id of the one shortcut Daimos registers.
 pub const TOGGLE_ID: &str = "toggle";
 
+/// The application id the portal knows Daimos by.
+pub(super) const APP_ID: &str = "dev.gravionlabs.daimos";
+
 enum Command {
     Register { binding: Binding, reply: Sender<Result<(), HotkeyError>> },
     Unregister { reply: Sender<()> },
@@ -123,6 +126,16 @@ async fn open(
         log::info!("GlobalShortcuts portal unavailable: {error}");
         HotkeyError::Unsupported { compositor: compositor.to_owned() }
     };
+    // A process that is not sandboxed has no app id for the portal to attach the shortcut to
+    // ("An app id is required"); the registry interface gives it one. Same as the Tauri identifier.
+    if let Err(error) = super::desktop_entry::ensure_for_current_exe() {
+        log::info!("cannot write the desktop entry: {error}");
+    }
+    if let Ok(app_id) = ashpd::AppID::try_from(APP_ID)
+        && let Err(error) = ashpd::register_host_app(app_id).await
+    {
+        log::info!("cannot register the host app id: {error}");
+    }
     let portal = GlobalShortcuts::new().await.map_err(unsupported)?;
     let session = portal.create_session(Default::default()).await.map_err(unsupported)?;
 
