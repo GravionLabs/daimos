@@ -66,6 +66,17 @@ jobs:
         run: cargo test --workspace
       - run: pnpm lint
       - run: pnpm test
+      # The real app, driven by the CLI (the criteria of the PBIs for the CLI, layer-shell and NSPanel).
+      - name: App check (headless sway)
+        if: matrix.session == 'wayland'
+        run: |
+          cargo build -p daimos-app -p daimos-cli
+          scripts/ci/run-in-sway.sh scripts/ci/sway-app-check.sh
+      - name: App check (macOS focus)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build -p daimos-app -p daimos-cli
+          scripts/ci/macos-focus-check.sh
       # `pnpm test` also checks that apps/ui/src/bindings.ts is current (bindings:check).
       # rpm bundling hangs on the runner and AppImage needs extra tools: the debug bundle on Linux is
       # the deb; the full set of packages is the v1.0 packaging work.
