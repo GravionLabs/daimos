@@ -227,7 +227,10 @@ mod tests {
 
     fn endpoint(dir: &tempfile::TempDir) -> Endpoint {
         if cfg!(windows) {
-            Endpoint::Pipe(format!("daimos-test-{}", std::process::id()))
+            // Tests run in parallel threads of one process: every test needs its own pipe.
+            static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = NEXT.fetch_add(1, Ordering::SeqCst);
+            Endpoint::Pipe(format!("daimos-test-{}-{n}", std::process::id()))
         } else {
             Endpoint::Path(dir.path().join("daimos.sock"))
         }
