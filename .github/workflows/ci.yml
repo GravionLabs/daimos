@@ -67,9 +67,11 @@ jobs:
       - run: pnpm lint
       - run: pnpm test
       # `pnpm test` also checks that apps/ui/src/bindings.ts is current (bindings:check).
+      # rpm bundling hangs on the runner and AppImage needs extra tools: the debug bundle on Linux is
+      # the deb; the full set of packages is the v1.0 packaging work.
       - name: Debug bundle
         if: matrix.session != 'wayland'
-        run: pnpm tauri build --debug
+        run: pnpm tauri build --debug ${{ runner.os == 'Linux' && '--bundles deb' || '' }}
       - name: Upload the debug bundle
         if: matrix.session != 'wayland'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -68,6 +68,8 @@ impl Endpoint {
     }
 }
 
+/// How long a stop waits for the accept thread before giving up on it.
+const SHUTDOWN_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 const MAX_REQUEST_BYTES: u64 = 64 * 1024;
 
 /// What the resident process does with a request.
@@ -78,6 +80,8 @@ pub struct Server {
     endpoint: Endpoint,
     stopping: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    /// Signalled by the accept thread when it ends.
+    finished: std::sync::mpsc::Receiver<()>,
 }
 
 impl Server {
@@ -127,6 +131,7 @@ impl Server {
         let stopping = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stopping);
         let handler: Arc<Handler> = Arc::new(handler);
+        let (done, finished) = std::sync::mpsc::channel();
         let thread = std::thread::Builder::new().name("daimos-ipc".into()).spawn(move || {
             for connection in listener.incoming() {
                 if flag.load(Ordering::SeqCst) {
@@ -145,8 +150,9 @@ impl Server {
                     Err(error) => log::warn!("ipc accept failed: {error}"),
                 }
             }
+            let _ = done.send(());
         })?;
-        Ok(Self { endpoint, stopping, thread: Some(thread) })
+        Ok(Self { endpoint, stopping, thread: Some(thread), finished })
     }
 
     pub fn endpoint(&self) -> &Endpoint {
@@ -162,9 +168,14 @@ impl Server {
         let Some(thread) = self.thread.take() else { return };
         self.stopping.store(true, Ordering::SeqCst);
         // `accept` blocks, so wake it with a connection that is dropped at once.
-        let woken = self.endpoint.name().is_ok_and(|name| Stream::connect(name).is_ok());
-        // Without the wake-up (socket file removed) `accept` never returns; detach, do not hang.
-        if woken {
+        // The connect runs on its own thread: on some systems it can block, and quitting must not.
+        if let Ok(name) = self.endpoint.name() {
+            std::thread::spawn(move || {
+                let _ = Stream::connect(name);
+            });
+        }
+        // If the accept thread does not end (socket file removed, blocked connect), detach it.
+        if self.finished.recv_timeout(SHUTDOWN_WAIT).is_ok() {
             let _ = thread.join();
         }
     }
