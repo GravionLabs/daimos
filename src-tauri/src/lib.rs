@@ -1,6 +1,7 @@
 //! The Tauri shell: commands, events, tray and window lifecycle on top of `daimos-core`.
 
 pub mod bindings;
+mod window_control;
 
 use daimos_core::settings::SettingsStore;
 use std::sync::Arc;
@@ -17,8 +18,10 @@ pub fn run() {
         .plugin(tauri_plugin_log::Builder::new().level(log::LevelFilter::Info).build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .invoke_handler(builder.invoke_handler())
+        .on_window_event(window_control::on_window_event)
         .setup(move |app| {
             builder.mount_events(app);
+            window_control::install(app.handle());
             setup_hotkey(app)?;
             Ok(())
         })
@@ -79,10 +82,11 @@ fn setup_hotkey(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let _ = HotkeyStatusChanged(status).emit(&handle);
     });
 
-    // The window toggle arrives with the resident-window work; until then a press is only logged.
+    let handle = app.handle().clone();
     std::thread::spawn(move || {
         for press in presses {
-            log::info!("hotkey pressed: {}", press.binding);
+            log::debug!("hotkey pressed: {}", press.binding);
+            window_control::toggle(&handle);
         }
     });
     Ok(())

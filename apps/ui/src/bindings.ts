@@ -9,6 +9,12 @@ export const commands = {
 	hotkeyStatus: () => __TAURI_INVOKE<HotkeyStatus>("hotkey_status"),
 	/**  Binds a new hotkey and stores it in the settings. A refused binding changes nothing. */
 	setHotkey: (binding: string) => typedError<null, HotkeyFailure>(__TAURI_INVOKE("set_hotkey", { binding })),
+	/**  The UI hides the window (`Esc` with an empty query). */
+	hideWindow: () => __TAURI_INVOKE<void>("hide_window"),
+	/**  The UI reports how many result rows it shows; the window grows or shrinks to fit. */
+	resizeWindow: (rows: number) => __TAURI_INVOKE<void>("resize_window", { rows }),
+	/**  The UI painted the first frame after a show: logs the time from the hotkey event to now. */
+	firstPaint: () => __TAURI_INVOKE<void>("first_paint"),
 };
 
 /** Events */

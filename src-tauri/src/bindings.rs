@@ -46,6 +46,32 @@ impl From<HotkeyError> for HotkeyFailure {
     }
 }
 
+/// The UI hides the window (`Esc` with an empty query).
+#[tauri::command]
+#[specta::specta]
+pub fn hide_window(app: AppHandle) {
+    crate::window_control::hide(&app);
+}
+
+/// The UI reports how many result rows it shows; the window grows or shrinks to fit.
+#[tauri::command]
+#[specta::specta]
+pub fn resize_window(host: State<'_, crate::window_control::Host>, rows: u32) {
+    host.resize_for_results(rows);
+}
+
+/// The UI painted the first frame after a show: logs the time from the hotkey event to now.
+#[tauri::command]
+#[specta::specta]
+pub fn first_paint(timer: State<'_, crate::window_control::ShowTimer>) {
+    if let Some(elapsed) = timer.finish() {
+        log::info!(
+            "window shown: hotkey to first paint in {:.1} ms",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+}
+
 /// What the UI shows about the hotkey: whether it works, which window system, and why not.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct HotkeyStatus {
@@ -119,7 +145,14 @@ pub struct WindowShown;
 
 pub fn builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
-        .commands(collect_commands![app_info, hotkey_status, set_hotkey])
+        .commands(collect_commands![
+            app_info,
+            hotkey_status,
+            set_hotkey,
+            hide_window,
+            resize_window,
+            first_paint
+        ])
         .events(collect_events![WindowShown, HotkeyStatusChanged])
 }
 
