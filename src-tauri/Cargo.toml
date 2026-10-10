@@ -8,6 +8,7 @@ license.workspace = true
 publish.workspace = true
 repository.workspace = true
 build = "build.rs"
+default-run = "daimos-app"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -16,6 +17,10 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
 daimos-core = { path = "../crates/daimos-core" }
 daimos-platform = { path = "../crates/daimos-platform" }
+specta = { version = "=2.0.0-rc.25", features = ["derive"] }
+specta-typescript = "0.0.12"
+tauri-specta = { version = "=2.0.0-rc.25", features = ["derive", "typescript"] }
+serde = { version = "1.0.229", features = ["derive"] }
 
 [lints]
 workspace = true

@@ -12,11 +12,11 @@ Status: M0 Foundation in progress (scaffold, hotkey, resident window).
 Requirements: Rust (the toolchain in `rust-toolchain.toml` is installed by `rustup`), Node.js 24 and
 pnpm (`corepack enable`), and the Tauri prerequisites of your platform.
 
-| Platform | Prerequisites |
-| -------- | ------------- |
+| Platform | Prerequisites                                                                                                                                           |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Linux    | `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev pkg-config build-essential` (X11 and Wayland) |
-| Windows  | Microsoft C++ Build Tools and WebView2 (preinstalled on Windows 11) |
-| macOS    | Xcode command line tools (`xcode-select --install`) |
+| Windows  | Microsoft C++ Build Tools and WebView2 (preinstalled on Windows 11)                                                                                     |
+| macOS    | Xcode command line tools (`xcode-select --install`)                                                                                                     |
 
 ```sh
 pnpm install

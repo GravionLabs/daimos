@@ -1,0 +1,22 @@
+{
+  "name": "daimos",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Cross-platform command palette (Tauri 2, Rust, SolidJS)",
+  "license": "MIT OR Apache-2.0",
+  "scripts": {
+    "dev": "pnpm tauri dev",
+    "tauri": "tauri",
+    "lint": "pnpm -r --if-present run lint && pnpm format:check",
+    "test": "pnpm -r --if-present run test && pnpm test:repo",
+    "test:repo": "node --test \".github/scripts/*.test.mjs\"",
+    "build": "pnpm -r --if-present run build",
+    "format": "prettier --write \"**/*.{yml,yaml}\" README.md",
+    "format:check": "prettier --check \"**/*.{yml,yaml}\" README.md",
+    "bindings": "cargo run -p daimos-app --bin export-bindings"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.1",
+    "prettier": "^3.9.9"
+  }
+}
