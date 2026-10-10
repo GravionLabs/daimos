@@ -139,6 +139,26 @@ impl StatusCell {
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 pub struct HotkeyStatusChanged(pub HotkeyStatus);
 
+/// The tray item `Settings` was chosen; the UI opens the settings page (M1).
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+pub struct OpenSettings;
+
+/// Whether Daimos starts hidden when the user logs in.
+#[tauri::command]
+#[specta::specta]
+pub fn autostart_enabled(app: AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn set_autostart(app: AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    let launcher = app.autolaunch();
+    if enabled { launcher.enable() } else { launcher.disable() }.map_err(|e| e.to_string())
+}
+
 /// Text for the search field, sent by `daimos show "text"` right after the window was shown.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 pub struct QuerySet(pub String);
@@ -157,7 +177,7 @@ pub fn builder() -> Builder<tauri::Wry> {
             resize_window,
             first_paint
         ])
-        .events(collect_events![WindowShown, HotkeyStatusChanged, QuerySet])
+        .events(collect_events![WindowShown, HotkeyStatusChanged, QuerySet, OpenSettings])
 }
 
 /// Writes the TypeScript bindings to `path`.

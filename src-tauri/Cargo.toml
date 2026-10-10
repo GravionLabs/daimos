@@ -14,7 +14,7 @@ default-run = "daimos-app"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png"] }
 daimos-core = { path = "../crates/daimos-core" }
 daimos-platform = { path = "../crates/daimos-platform" }
 specta = { version = "=2.0.0-rc.25", features = ["derive"] }
@@ -24,6 +24,7 @@ serde = { version = "1.0.229", features = ["derive"] }
 tauri-plugin-global-shortcut = "2.4.1"
 log = "0.4.34"
 tauri-plugin-log = "2.10.1"
+tauri-plugin-autostart = "2.7.0"
 
 [lints]
 workspace = true

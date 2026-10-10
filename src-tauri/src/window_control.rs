@@ -85,6 +85,7 @@ pub fn on_window_event(window: &tauri::Window<Wry>, event: &tauri::WindowEvent) 
                 hide(app);
             }
         }
+        tauri::WindowEvent::ThemeChanged(theme) => crate::tray::follow_theme(app, *theme),
         _ => {}
     }
 }

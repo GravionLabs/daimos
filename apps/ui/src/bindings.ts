@@ -20,6 +20,7 @@ export const commands = {
 /** Events */
 export const events = {
 	hotkeyStatusChanged: makeEvent<HotkeyStatusChanged>("hotkey-status-changed"),
+	openSettings: makeEvent<OpenSettings>("open-settings"),
 	querySet: makeEvent<QuerySet>("query-set"),
 	windowShown: makeEvent<WindowShown>("window-shown"),
 };
@@ -49,6 +50,9 @@ export type HotkeyStatus = {
 
 /**  Emitted when the hotkey state changes after start-up (the portal dialog was answered). */
 export type HotkeyStatusChanged = HotkeyStatus;
+
+/**  The tray item `Settings` was chosen; the UI opens the settings page (M1). */
+export type OpenSettings = null;
 
 /**  Text for the search field, sent by `daimos show "text"` right after the window was shown. */
 export type QuerySet = string;

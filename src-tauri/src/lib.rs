@@ -2,6 +2,7 @@
 
 pub mod bindings;
 mod ipc_server;
+mod tray;
 mod window_control;
 
 use daimos_core::settings::SettingsStore;
@@ -14,16 +15,26 @@ use tauri::Manager;
 use tauri_specta::Event;
 
 pub fn run() {
+    // Process start to hotkey ready is a budget of the product spec (500 ms).
+    let started = std::time::Instant::now();
     let builder = bindings::builder();
     tauri::Builder::default()
         .plugin(tauri_plugin_log::Builder::new().level(log::LevelFilter::Info).build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--hidden"]),
+        ))
         .invoke_handler(builder.invoke_handler())
         .on_window_event(window_control::on_window_event)
         .setup(move |app| {
             builder.mount_events(app);
             window_control::install(app.handle());
-            setup_hotkey(app)?;
+            // No tray (a desktop without a status notifier host) must not stop the hotkey and the CLI.
+            if let Err(error) = tray::install(app.handle()) {
+                log::warn!("no tray icon: {error}");
+            }
+            setup_hotkey(app, started)?;
             ipc_server::start(app.handle());
             Ok(())
         })
@@ -47,7 +58,10 @@ fn shutdown(app: &tauri::AppHandle) {
 /// Registers the stored hotkey on a background thread: on Wayland the first registration waits
 /// for the portal dialog. A refused or unsupported binding is logged and shown by the UI; it must
 /// not stop the app, because the CLI and the tray still work.
-fn setup_hotkey(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+fn setup_hotkey(
+    app: &tauri::App,
+    started: std::time::Instant,
+) -> Result<(), Box<dyn std::error::Error>> {
     let store = SettingsStore::new(app.path().app_config_dir()?);
     let settings = store.load().unwrap_or_else(|error| {
         log::warn!("settings unreadable, using defaults: {error}");
@@ -71,7 +85,10 @@ fn setup_hotkey(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let binding = Binding::new(settings.hotkey);
         let status = match service.bind(&binding) {
             Ok(()) => {
-                log::info!("hotkey {binding} registered");
+                log::info!(
+                    "hotkey {binding} registered {} ms after process start",
+                    started.elapsed().as_millis()
+                );
                 HotkeyStatus {
                     state: "active".into(),
                     session: session_name,
