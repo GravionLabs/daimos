@@ -1,0 +1,48 @@
+name: PR readiness
+
+# Fails when a PR closes an issue that is not ready (AGENTS.md, "Issue conventions" → definition of
+# ready): labeled needs-refinement or needs-decision, or blocked by an issue that is still open.
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+
+jobs:
+  ready:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          sparse-checkout: .github/scripts
+
+      - uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const { closingRefs, readinessProblems } = await import(`${process.env.GITHUB_WORKSPACE}/.github/scripts/pr-ready.mjs`);
+            const { owner, repo } = context.repo;
+            // Re-read the PR: an edited body is not in the payload of a synchronize event.
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: context.payload.pull_request.number });
+            const refs = closingRefs(pr.body);
+            if (refs.length === 0) {
+              core.notice('This PR closes no issue (no "Closes #n" in its body); nothing to check.');
+              return;
+            }
+
+            const problems = [];
+            for (const issue_number of refs) {
+              const { data: issue } = await github.rest.issues.get({ owner, repo, issue_number }).catch(() => ({ data: null }));
+              if (!issue || issue.pull_request) continue;
+              const { data: blockers } = await github.request('GET /repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by', { owner, repo, issue_number });
+              problems.push(...readinessProblems(issue, blockers));
+            }
+
+            const lines = problems.map((p) => `- ${p}`).join('\n');
+            await core.summary
+              .addHeading('PR readiness', 3)
+              .addRaw(problems.length ? `Not ready:\n\n${lines}\n` : `Ready: ${refs.map((n) => `#${n}`).join(', ')}\n`)
+              .write();
+            if (problems.length) core.setFailed(`Issues closed by this PR are not ready:\n${lines}`);
