@@ -91,11 +91,11 @@ async fn serve(
     while let Some(command) = commands.recv().await {
         match command {
             Command::Register { binding, reply } => {
-                close(live.take()).await;
+                // The new session first: a failed attempt keeps the old one alive.
                 let result = open(&binding, &bus, &compositor).await;
                 let _ = reply.send(match result {
                     Ok(opened) => {
-                        live = Some(opened);
+                        close(live.replace(opened)).await;
                         Ok(())
                     }
                     Err(error) => Err(error),

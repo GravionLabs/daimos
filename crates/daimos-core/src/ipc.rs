@@ -4,7 +4,7 @@
 //! with a [`Response`] and closes the connection. The socket is a Unix socket on Linux and macOS
 //! and a named pipe on Windows, reachable by the current user only.
 
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -68,6 +68,8 @@ impl Endpoint {
     }
 }
 
+const MAX_REQUEST_BYTES: u64 = 64 * 1024;
+
 /// What the resident process does with a request.
 pub type Handler = dyn Fn(Request) -> Response + Send + Sync + 'static;
 
@@ -92,6 +94,10 @@ impl Server {
             std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
         }
 
+        // A live listener means another Daimos runs; taking its socket would orphan it.
+        if Stream::connect(endpoint.name()?).is_ok() {
+            return Err(io::Error::new(io::ErrorKind::AddrInUse, "Daimos is already running"));
+        }
         let options = ListenerOptions::new().name(endpoint.name()?);
         // A corpse of a crashed run would make the address look taken.
         let options = options.try_overwrite(true);
@@ -150,10 +156,11 @@ impl Server {
         let Some(thread) = self.thread.take() else { return };
         self.stopping.store(true, Ordering::SeqCst);
         // `accept` blocks, so wake it with a connection that is dropped at once.
-        if let Ok(name) = self.endpoint.name() {
-            let _ = Stream::connect(name);
+        let woken = self.endpoint.name().is_ok_and(|name| Stream::connect(name).is_ok());
+        // Without the wake-up (socket file removed) `accept` never returns; detach, do not hang.
+        if woken {
+            let _ = thread.join();
         }
-        let _ = thread.join();
     }
 }
 
@@ -166,7 +173,8 @@ impl Drop for Server {
 fn serve(connection: Stream, handler: &Handler) -> io::Result<()> {
     let mut reader = BufReader::new(connection);
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    // One request is a short line; cap it so a client cannot grow the buffer without bound.
+    (&mut reader).take(MAX_REQUEST_BYTES).read_line(&mut line)?;
     let response = match serde_json::from_str::<Request>(line.trim()) {
         Ok(request) => handler(request),
         Err(error) => Response::Error { message: format!("bad request: {error}") },
@@ -243,6 +251,16 @@ mod tests {
         assert_eq!(answer.unwrap(), Response::Ok);
         assert_eq!(*seen.lock().unwrap(), [Request::Show { query: Some("firefox".into()) }]);
         server.stop();
+    }
+
+    #[test]
+    fn a_second_instance_does_not_take_over_the_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = Server::start(endpoint(&dir), |_| Response::Ok).unwrap();
+        let second =
+            Server::start(endpoint(&dir), |_| Response::Error { message: "second".into() });
+        assert_eq!(second.err().map(|e| e.kind()), Some(io::ErrorKind::AddrInUse));
+        assert_eq!(send(first.endpoint(), &Request::Hide).unwrap(), Response::Ok);
     }
 
     #[test]

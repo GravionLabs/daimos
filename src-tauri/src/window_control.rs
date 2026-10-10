@@ -17,15 +17,19 @@ const BLUR_GRACE: Duration = Duration::from_millis(150);
 #[derive(Default)]
 pub struct ShowTimer {
     started: Mutex<Option<Instant>>,
+    /// When the window was last shown; kept after `finish` so the blur grace still applies.
+    shown_at: Mutex<Option<Instant>>,
 }
 
 impl ShowTimer {
     fn start(&self) {
-        *self.started.lock().expect("timer lock") = Some(Instant::now());
+        let now = Instant::now();
+        *self.started.lock().expect("timer lock") = Some(now);
+        *self.shown_at.lock().expect("timer lock") = Some(now);
     }
 
     fn since_start(&self) -> Option<Duration> {
-        self.started.lock().expect("timer lock").map(|t| t.elapsed())
+        self.shown_at.lock().expect("timer lock").map(|t| t.elapsed())
     }
 
     /// Elapsed time of the show in flight, consumed so a second paint is not counted twice.

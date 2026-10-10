@@ -4,7 +4,7 @@
 //! [`PreviousWindow`] before the window is shown, so that actions such as paste can act on the
 //! window that was active before Daimos opened.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, Runtime, WebviewWindow};
@@ -69,21 +69,16 @@ pub trait WindowHost: Send + Sync {
 pub struct TauriWindowHost<R: Runtime> {
     app: AppHandle<R>,
     label: String,
-    previous: Mutex<Option<PreviousWindow>>,
+    previous: Arc<Mutex<Option<PreviousWindow>>>,
 }
 
 impl<R: Runtime> TauriWindowHost<R> {
     pub fn new(app: AppHandle<R>, label: impl Into<String>) -> Self {
-        Self { app, label: label.into(), previous: Mutex::new(None) }
+        Self { app, label: label.into(), previous: Arc::default() }
     }
 
-    fn window(&self) -> Option<WebviewWindow<R>> {
-        self.app.get_webview_window(&self.label)
-    }
-}
-
-impl<R: Runtime> WindowHost for TauriWindowHost<R> {
-    fn show(&self) {
+    /// The body of `show`; runs on the main thread.
+    fn show_here(&self) {
         let Some(window) = self.window() else { return };
         // Before the window exists on screen, so the platform still sees the old foreground.
         *self.previous.lock().expect("previous window lock") = crate::platform::previous_window();
@@ -95,6 +90,23 @@ impl<R: Runtime> WindowHost for TauriWindowHost<R> {
         if !focused && let Err(error) = window.set_focus() {
             log::warn!("cannot focus the window: {error}");
         }
+    }
+
+    fn window(&self) -> Option<WebviewWindow<R>> {
+        self.app.get_webview_window(&self.label)
+    }
+}
+
+impl<R: Runtime> WindowHost for TauriWindowHost<R> {
+    fn show(&self) {
+        // AppKit and Win32 focus calls belong on the thread that owns the window, and `show` is
+        // called from the hotkey, socket, and tray threads.
+        let host = Self {
+            app: self.app.clone(),
+            label: self.label.clone(),
+            previous: Arc::clone(&self.previous),
+        };
+        let _ = self.app.run_on_main_thread(move || host.show_here());
     }
 
     fn hide(&self) {

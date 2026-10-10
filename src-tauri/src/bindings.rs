@@ -124,7 +124,12 @@ pub async fn set_hotkey(
     status: State<'_, StatusCell>,
     binding: String,
 ) -> Result<(), HotkeyFailure> {
-    hotkey.bind(&Binding::new(binding.clone()))?;
+    let service = std::sync::Arc::clone(&hotkey);
+    let wanted = Binding::new(binding.clone());
+    // `bind` can wait for the portal dialog; keep it off the async runtime.
+    tauri::async_runtime::spawn_blocking(move || service.bind(&wanted)).await.map_err(|e| {
+        HotkeyFailure { kind: "backend".into(), binding: None, message: e.to_string() }
+    })??;
     status.set(HotkeyStatus {
         state: "active".into(),
         session: status.get().session,

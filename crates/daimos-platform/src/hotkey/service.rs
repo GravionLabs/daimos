@@ -38,7 +38,9 @@ impl HotkeyService {
 
     /// Unregisters the current binding, for example on quit.
     pub fn release(&self) -> Result<(), HotkeyError> {
-        match self.current.lock().expect("hotkey lock").take() {
+        // A first-run portal dialog can hold the lock for minutes; quitting must not wait for it.
+        let Ok(mut current) = self.current.try_lock() else { return Ok(()) };
+        match current.take() {
             Some(old) => self.backend.unregister(&old),
             None => Ok(()),
         }
