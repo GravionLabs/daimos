@@ -6,6 +6,8 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 /** Commands */
 export const commands = {
 	appInfo: () => __TAURI_INVOKE<AppInfo>("app_info"),
+	/**  Binds a new hotkey and stores it in the settings. A refused binding changes nothing. */
+	setHotkey: (binding: string) => typedError<null, HotkeyFailure>(__TAURI_INVOKE("set_hotkey", { binding })),
 };
 
 /** Events */
@@ -20,10 +22,26 @@ export type AppInfo = {
 	version: string,
 };
 
+/**  Why a hotkey could not be set; `binding` is the accelerator that was refused. */
+export type HotkeyFailure = {
+	kind: string,
+	binding: string | null,
+	message: string,
+};
+
 /**  Emitted every time the window is shown, so the UI can clear the query without being recreated. */
 export type WindowShown = null;
 
 /* Tauri Specta runtime */
+async function typedError<T, E>(result: Promise<T>): Promise<{ status: "ok"; data: T } | { status: "error"; error: E }> {
+    try {
+        return { status: "ok", data: await result };
+    } catch (e) {
+        if (e instanceof Error) throw e;
+        return { status: "error", error: e as any };
+    }
+}
+
 type EventEmit<T> = [T] extends [null] ? () => Promise<void> : (payload: T) => Promise<void>;
 
 function makeEvent<T>(name: string, serialize?: (payload: T) => unknown, deserialize?: (payload: any) => T) {
