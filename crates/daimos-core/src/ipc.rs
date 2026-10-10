@@ -101,7 +101,8 @@ impl Server {
         let options = ListenerOptions::new().name(endpoint.name()?);
         // A corpse of a crashed run would make the address look taken.
         let options = options.try_overwrite(true);
-        #[cfg(unix)]
+        // Only some Unixes can set the mode at creation (macOS answers `Unsupported`).
+        #[cfg(target_os = "linux")]
         let options = {
             use interprocess::os::unix::local_socket::ListenerOptionsExt;
             options.mode(0o600)
@@ -117,6 +118,11 @@ impl Server {
             options.security_descriptor(sd)
         };
         let listener = options.create_sync()?;
+        #[cfg(all(unix, not(target_os = "linux")))]
+        if let Endpoint::Path(path) = &endpoint {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
 
         let stopping = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stopping);
