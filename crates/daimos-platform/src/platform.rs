@@ -42,7 +42,10 @@ pub(crate) fn previous_window() -> Option<PreviousWindow> {
 /// must not call `set_focus` (on macOS that activates the whole application).
 pub(crate) fn after_show<R: Runtime>(window: &WebviewWindow<R>) -> bool {
     #[cfg(target_os = "macos")]
-    return crate::macos::show_and_make_key(window.app_handle(), window.label());
+    return {
+        use tauri::Manager;
+        crate::macos::show_and_make_key(window.app_handle(), window.label())
+    };
     #[cfg(windows)]
     if let Ok(hwnd) = window.hwnd() {
         // The raw handle type of Tauri's `windows` dependency and ours are the same struct.

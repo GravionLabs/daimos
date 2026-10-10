@@ -2,8 +2,10 @@
 #![cfg(unix)]
 
 use std::process::Command;
+#[cfg(target_os = "linux")]
 use std::sync::{Arc, Mutex};
 
+#[cfg(target_os = "linux")]
 use daimos_core::ipc::{Endpoint, Request, Response, Server};
 
 fn daimos(runtime_dir: &std::path::Path, args: &[&str]) -> std::process::Output {

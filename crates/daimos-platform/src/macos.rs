@@ -4,7 +4,7 @@
 //! menu bar and "act on the current window" (paste, later) has no target. The panel joins every
 //! Space, shows over full-screen apps, floats, and hides when it stops being the key window.
 
-use tauri::{AppHandle, Manager, Runtime, WebviewWindow};
+use tauri::{AppHandle, Runtime, WebviewWindow};
 use tauri_nspanel::{
     CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt, tauri_panel,
 };
@@ -20,10 +20,12 @@ tauri_panel! {
 }
 
 /// Converts the window to a panel. Call once, right after the window was created.
-pub fn convert<R: Runtime>(window: &WebviewWindow<R>) -> tauri::Result<()> {
-    let panel = window.to_panel::<DaimosPanel<R>>()?;
+pub fn convert<R: Runtime>(window: &WebviewWindow<R>) -> Result<(), String> {
+    let panel = window.to_panel::<DaimosPanel<R>>().map_err(|e| e.to_string())?;
     panel.set_level(PanelLevel::Floating.into());
-    panel.add_style_mask(StyleMask::empty().nonactivating_panel().into())?;
+    panel
+        .add_style_mask(StyleMask::empty().nonactivating_panel().into())
+        .map_err(|e| format!("{e:?}"))?;
     panel.set_collection_behavior(
         CollectionBehavior::new().can_join_all_spaces().full_screen_auxiliary().into(),
     );
