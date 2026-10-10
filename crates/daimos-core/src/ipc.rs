@@ -275,6 +275,9 @@ mod tests {
         server.stop();
     }
 
+    // Windows pipes have no overwrite, but a second listener there is not refused either; the
+    // app keeps a single instance with tauri-plugin-single-instance.
+    #[cfg(unix)]
     #[test]
     fn a_second_instance_does_not_take_over_the_socket() {
         let dir = tempfile::tempdir().unwrap();

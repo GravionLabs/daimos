@@ -19,6 +19,8 @@ pub fn run() {
     let started = std::time::Instant::now();
     let builder = bindings::builder();
     tauri::Builder::default()
+        // First, as the plugin requires. Starting Daimos again shows the running one.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| window_control::show(app)))
         .plugin(tauri_plugin_log::Builder::new().level(log::LevelFilter::Info).build())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
