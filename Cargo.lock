@@ -794,6 +794,7 @@ dependencies = [
  "specta-typescript",
  "tauri",
  "tauri-build",
+ "tauri-nspanel",
  "tauri-plugin-autostart",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-log",

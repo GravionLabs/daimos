@@ -56,6 +56,8 @@ pub fn show(app: &AppHandle<Wry>) {
     let host = app.state::<Host>();
     app.state::<ShowTimer>().start();
     host.show();
+    // The CI jobs on sway and macOS read these lines (scripts/ci/*-check.sh).
+    log::info!("window visibility: shown");
     // The UI clears its query on this event; it answers with `first_paint`.
     let _ = WindowShown.emit(app);
 }
@@ -69,6 +71,7 @@ pub fn show_with_query(app: &AppHandle<Wry>, query: &str) {
 
 pub fn hide(app: &AppHandle<Wry>) {
     app.state::<Host>().hide();
+    log::info!("window visibility: hidden");
 }
 
 pub fn toggle(app: &AppHandle<Wry>) {
