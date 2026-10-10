@@ -218,23 +218,11 @@ pub fn export(path: impl AsRef<std::path::Path>) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The checked-in bindings must be what the Rust side generates today.
-    #[test]
-    fn checked_in_bindings_are_current() {
-        let checked_in =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../apps/ui/src/bindings.ts");
-        let generated = std::env::temp_dir().join("daimos-bindings-check.ts");
-        export(&generated).expect("export bindings");
-        let want = std::fs::read_to_string(&generated).expect("generated file");
-        let have = std::fs::read_to_string(&checked_in).expect("apps/ui/src/bindings.ts exists");
-        assert_eq!(
-            have.replace("\r\n", "\n"),
-            want.replace("\r\n", "\n"),
-            "bindings.ts is stale: run `pnpm bindings`"
-        );
-    }
+/// Whether the checked-in bindings are what the Rust side generates today.
+pub fn is_current(path: impl AsRef<std::path::Path>) -> Result<bool, Box<dyn std::error::Error>> {
+    let generated = std::env::temp_dir().join("daimos-bindings-check.ts");
+    export(&generated)?;
+    let want = std::fs::read_to_string(&generated)?.replace("\r\n", "\n");
+    let have = std::fs::read_to_string(path)?.replace("\r\n", "\n");
+    Ok(want == have)
 }

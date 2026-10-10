@@ -25,7 +25,8 @@ unset DISPLAY
 
 cleanup() {
   kill "${sway_pid:-}" "${portal_pid:-}" "${portal_wlr_pid:-}" 2>/dev/null || true
-  rm -rf "$runtime_dir"
+  sleep 0.5
+  rm -rf "$runtime_dir" 2>/dev/null || true
 }
 trap cleanup EXIT
 

@@ -8,12 +8,13 @@
     "dev": "pnpm tauri dev",
     "tauri": "tauri",
     "lint": "pnpm -r --if-present run lint && pnpm format:check",
-    "test": "pnpm -r --if-present run test && pnpm test:repo",
+    "test": "pnpm -r --if-present run test && pnpm test:repo && pnpm bindings:check",
     "test:repo": "node --test \".github/scripts/*.test.mjs\"",
     "build": "pnpm -r --if-present run build",
     "format": "prettier --write \"**/*.{yml,yaml}\" README.md",
     "format:check": "prettier --check \"**/*.{yml,yaml}\" README.md",
-    "bindings": "cargo run -p daimos-app --bin export-bindings"
+    "bindings": "cargo run -p daimos-app --bin export-bindings",
+    "bindings:check": "cargo run -q -p daimos-app --bin export-bindings -- --check"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.12.1",
