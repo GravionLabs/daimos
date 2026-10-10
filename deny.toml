@@ -1,0 +1,36 @@
+# cargo-deny: licenses and advisories (`cargo deny check`), run on every pull request.
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+ignore = [
+  # proc-macro-error is a build-time dependency of the GTK 3 bindings that Tauri uses on Linux; there is no
+  # fix until Tauri moves to GTK 4. Revisit when it does.
+  { id = "RUSTSEC-2024-0370", reason = "build-time only, pulled in by gtk3-macros through Tauri" },
+]
+
+[licenses]
+version = 2
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Zlib",
+  "MPL-2.0",
+  "CC0-1.0",
+  "0BSD",
+  "Unlicense",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

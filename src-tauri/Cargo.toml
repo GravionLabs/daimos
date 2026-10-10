@@ -1,0 +1,25 @@
+[package]
+name = "daimos-app"
+description = "Cross-platform command palette"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+build = "build.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["protocol-asset", "tray-icon"] }
+daimos-core = { path = "../crates/daimos-core" }
+daimos-platform = { path = "../crates/daimos-platform" }
+
+[lints]
+workspace = true
+
+[lib]
+name = "daimos_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
