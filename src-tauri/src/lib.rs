@@ -1,6 +1,7 @@
 //! The Tauri shell: commands, events, tray and window lifecycle on top of `daimos-core`.
 
 pub mod bindings;
+mod ipc_server;
 mod window_control;
 
 use daimos_core::settings::SettingsStore;
@@ -23,10 +24,24 @@ pub fn run() {
             builder.mount_events(app);
             window_control::install(app.handle());
             setup_hotkey(app)?;
+            ipc_server::start(app.handle());
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Daimos");
+        .build(tauri::generate_context!())
+        .expect("error while building Daimos")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                shutdown(app);
+            }
+        });
+}
+
+/// Quit from the tray or the CLI: stop the socket listener and give the hotkey back.
+fn shutdown(app: &tauri::AppHandle) {
+    ipc_server::stop(app);
+    if let Some(hotkey) = app.try_state::<Arc<HotkeyService>>() {
+        let _ = hotkey.release();
+    }
 }
 
 /// Registers the stored hotkey on a background thread: on Wayland the first registration waits

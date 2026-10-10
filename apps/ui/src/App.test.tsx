@@ -4,6 +4,7 @@ import type { Host } from "./host";
 
 function fakeHost() {
   let shown: (() => void) | undefined;
+  let query: ((query: string) => void) | undefined;
   const host: Host = {
     onShown: (callback) => {
       shown = callback;
@@ -11,11 +12,17 @@ function fakeHost() {
         shown = undefined;
       };
     },
+    onQuery: (callback) => {
+      query = callback;
+      return () => {
+        query = undefined;
+      };
+    },
     firstPaint: vi.fn(),
     hide: vi.fn(),
     resize: vi.fn(),
   };
-  return { host, show: () => shown?.() };
+  return { host, show: () => shown?.(), sendQuery: (text: string) => query?.(text) };
 }
 
 describe("App", () => {
@@ -35,6 +42,14 @@ describe("App", () => {
     await waitFor(() => expect(box).toHaveValue(""));
     expect(screen.getByRole("searchbox")).toBe(box);
     expect(mounts.count).toBe(1);
+  });
+
+  it("fills the search field with text sent by the CLI", async () => {
+    const { host, show, sendQuery } = fakeHost();
+    render(() => <App host={host} />);
+    show();
+    sendQuery("calc 2+2");
+    await waitFor(() => expect(screen.getByRole("searchbox")).toHaveValue("calc 2+2"));
   });
 
   it("reports the first paint after a show", async () => {

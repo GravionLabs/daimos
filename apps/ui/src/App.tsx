@@ -16,7 +16,11 @@ export function App(props: { host?: Host }) {
       // Two frames: the first applies the cleared state, the second is on screen.
       requestAnimationFrame(() => requestAnimationFrame(() => host().firstPaint()));
     });
-    onCleanup(unsubscribe);
+    const unsubscribeQuery = host().onQuery(setQuery);
+    onCleanup(() => {
+      unsubscribe();
+      unsubscribeQuery();
+    });
   });
 
   return (

@@ -7,7 +7,7 @@ use daimos_platform::window::{TauriWindowHost, WindowHost};
 use tauri::{AppHandle, Manager, Wry};
 use tauri_specta::Event;
 
-use crate::bindings::WindowShown;
+use crate::bindings::{QuerySet, WindowShown};
 
 /// Blur events right after a show are the window system settling the focus, not the user
 /// clicking away.
@@ -47,6 +47,13 @@ pub fn show(app: &AppHandle<Wry>) {
     host.show();
     // The UI clears its query on this event; it answers with `first_paint`.
     let _ = WindowShown.emit(app);
+}
+
+/// Shows the window and puts `query` into the search field.
+pub fn show_with_query(app: &AppHandle<Wry>, query: &str) {
+    show(app);
+    // After `show`: the UI clears its query on the show event and then takes this one.
+    let _ = QuerySet(query.to_owned()).emit(app);
 }
 
 pub fn hide(app: &AppHandle<Wry>) {

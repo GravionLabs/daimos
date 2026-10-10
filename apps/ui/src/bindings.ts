@@ -20,6 +20,7 @@ export const commands = {
 /** Events */
 export const events = {
 	hotkeyStatusChanged: makeEvent<HotkeyStatusChanged>("hotkey-status-changed"),
+	querySet: makeEvent<QuerySet>("query-set"),
 	windowShown: makeEvent<WindowShown>("window-shown"),
 };
 
@@ -48,6 +49,9 @@ export type HotkeyStatus = {
 
 /**  Emitted when the hotkey state changes after start-up (the portal dialog was answered). */
 export type HotkeyStatusChanged = HotkeyStatus;
+
+/**  Text for the search field, sent by `daimos show "text"` right after the window was shown. */
+export type QuerySet = string;
 
 /**  Emitted every time the window is shown, so the UI can clear the query without being recreated. */
 export type WindowShown = null;

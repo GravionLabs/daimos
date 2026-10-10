@@ -139,6 +139,10 @@ impl StatusCell {
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 pub struct HotkeyStatusChanged(pub HotkeyStatus);
 
+/// Text for the search field, sent by `daimos show "text"` right after the window was shown.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+pub struct QuerySet(pub String);
+
 /// Emitted every time the window is shown, so the UI can clear the query without being recreated.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 pub struct WindowShown;
@@ -153,7 +157,7 @@ pub fn builder() -> Builder<tauri::Wry> {
             resize_window,
             first_paint
         ])
-        .events(collect_events![WindowShown, HotkeyStatusChanged])
+        .events(collect_events![WindowShown, HotkeyStatusChanged, QuerySet])
 }
 
 /// Writes the TypeScript bindings to `path`.
