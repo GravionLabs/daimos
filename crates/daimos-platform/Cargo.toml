@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 daimos-core = { version = "0.1.0", path = "../daimos-core" }
+log = "0.4.34"
 serde = { version = "1.0.229", features = ["derive"] }
 tauri = "2.12.2"
 tauri-plugin-global-shortcut = "2.4.1"
@@ -20,3 +21,8 @@ tauri-plugin-global-shortcut = "2.4.1"
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "global_shortcuts"] }
+futures-util = "0.3.34"
+tokio = { version = "1.53.2", features = ["rt", "sync", "time", "macros"] }

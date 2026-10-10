@@ -3,8 +3,13 @@
 pub mod bindings;
 
 use daimos_core::settings::SettingsStore;
-use daimos_platform::hotkey::{self, Binding, HotkeyService};
+use std::sync::Arc;
+
+use bindings::{HotkeyStatus, HotkeyStatusChanged, StatusCell};
+use daimos_platform::hotkey::{self, Binding, HotkeyError, HotkeyService};
+use daimos_platform::session::Session;
 use tauri::Manager;
+use tauri_specta::Event;
 
 pub fn run() {
     let builder = bindings::builder();
@@ -21,8 +26,9 @@ pub fn run() {
         .expect("error while running Daimos");
 }
 
-/// Registers the stored hotkey. A refused or unsupported binding is logged and shown by the UI;
-/// it must not stop the app, because the CLI and the tray still work.
+/// Registers the stored hotkey on a background thread: on Wayland the first registration waits
+/// for the portal dialog. A refused or unsupported binding is logged and shown by the UI; it must
+/// not stop the app, because the CLI and the tray still work.
 fn setup_hotkey(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let store = SettingsStore::new(app.path().app_config_dir()?);
     let settings = store.load().unwrap_or_else(|error| {
@@ -30,13 +36,48 @@ fn setup_hotkey(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         Default::default()
     });
 
-    let service = HotkeyService::new(hotkey::detect(app.handle()));
+    let session = Session::detect();
+    let session_name = format!("{session:?}").to_lowercase();
+    let service = Arc::new(HotkeyService::new(hotkey::detect(app.handle())));
     let presses = service.backend().presses();
-    match service.bind(&Binding::new(settings.hotkey)) {
-        Ok(()) => log::info!("hotkey registered"),
-        Err(error) => log::warn!("hotkey not registered: {error}"),
-    }
-    app.manage(service);
+    app.manage(StatusCell::new(HotkeyStatus {
+        state: "pending".into(),
+        session: session_name.clone(),
+        binding: Some(settings.hotkey.clone()),
+        message: None,
+    }));
+    app.manage(Arc::clone(&service));
+
+    let handle = app.handle().clone();
+    std::thread::spawn(move || {
+        let binding = Binding::new(settings.hotkey);
+        let status = match service.bind(&binding) {
+            Ok(()) => {
+                log::info!("hotkey {binding} registered");
+                HotkeyStatus {
+                    state: "active".into(),
+                    session: session_name,
+                    binding: Some(binding.to_string()),
+                    message: None,
+                }
+            }
+            Err(error) => {
+                log::warn!("hotkey not registered: {error}");
+                let state = match error {
+                    HotkeyError::Unsupported { .. } => "unsupported",
+                    _ => "failed",
+                };
+                HotkeyStatus {
+                    state: state.into(),
+                    session: session_name,
+                    binding: Some(binding.to_string()),
+                    message: Some(error.to_string()),
+                }
+            }
+        };
+        handle.state::<StatusCell>().set(status.clone());
+        let _ = HotkeyStatusChanged(status).emit(&handle);
+    });
 
     // The window toggle arrives with the resident-window work; until then a press is only logged.
     std::thread::spawn(move || {

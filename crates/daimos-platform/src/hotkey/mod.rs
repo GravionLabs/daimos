@@ -4,6 +4,8 @@
 //! `tauri-plugin-global-shortcut`; Wayland has its own (the XDG GlobalShortcuts portal).
 
 mod global_shortcut;
+#[cfg(target_os = "linux")]
+mod portal;
 mod service;
 
 use std::fmt;
@@ -13,6 +15,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Runtime};
 
 pub use global_shortcut::GlobalShortcutHotkey;
+#[cfg(target_os = "linux")]
+pub use portal::{PortalHotkey, TOGGLE_ID, trigger_for};
 pub use service::HotkeyService;
 
 use crate::session::Session;
@@ -79,11 +83,14 @@ pub fn detect<R: Runtime>(app: &AppHandle<R>) -> Box<dyn Hotkey> {
 /// [`detect`] for a given session.
 pub fn detect_for<R: Runtime>(app: &AppHandle<R>, session: Session) -> Box<dyn Hotkey> {
     match session {
-        // Wayland has no global grab; the portal backend lands with the XDG GlobalShortcuts PBI.
-        // Until then the compositor binding for `daimos toggle` is the way in.
+        // Wayland has no global grab: the compositor owns the shortcut and tells us about it
+        // through the GlobalShortcuts portal.
+        #[cfg(target_os = "linux")]
         Session::Wayland => {
-            Box::new(Unsupported { compositor: Session::desktop(|k| std::env::var(k).ok()) })
+            Box::new(PortalHotkey::new(Session::desktop(|k| std::env::var(k).ok())))
         }
+        #[cfg(not(target_os = "linux"))]
+        Session::Wayland => Box::new(Unsupported { compositor: "wayland".into() }),
         Session::X11 | Session::Windows | Session::MacOs => {
             Box::new(GlobalShortcutHotkey::new(app.clone()))
         }
@@ -91,10 +98,12 @@ pub fn detect_for<R: Runtime>(app: &AppHandle<R>, session: Session) -> Box<dyn H
 }
 
 /// Backend for a session that cannot register a hotkey.
+#[cfg(not(target_os = "linux"))]
 struct Unsupported {
     compositor: String,
 }
 
+#[cfg(not(target_os = "linux"))]
 impl Hotkey for Unsupported {
     fn register(&self, _: &Binding) -> Result<Registration, HotkeyError> {
         Err(HotkeyError::Unsupported { compositor: self.compositor.clone() })

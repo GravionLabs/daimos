@@ -46,15 +46,38 @@ impl From<HotkeyError> for HotkeyFailure {
     }
 }
 
+/// What the UI shows about the hotkey: whether it works, which window system, and why not.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct HotkeyStatus {
+    /// `active`, `pending` (waiting for the portal dialog), `unsupported`, or `failed`.
+    pub state: String,
+    pub session: String,
+    pub binding: Option<String>,
+    pub message: Option<String>,
+}
+
+#[tauri::command]
+#[specta::specta]
+pub fn hotkey_status(status: State<'_, StatusCell>) -> HotkeyStatus {
+    status.get()
+}
+
 /// Binds a new hotkey and stores it in the settings. A refused binding changes nothing.
 #[tauri::command]
 #[specta::specta]
-pub fn set_hotkey(
+pub async fn set_hotkey(
     app: AppHandle,
-    hotkey: State<'_, HotkeyService>,
+    hotkey: State<'_, std::sync::Arc<HotkeyService>>,
+    status: State<'_, StatusCell>,
     binding: String,
 ) -> Result<(), HotkeyFailure> {
     hotkey.bind(&Binding::new(binding.clone()))?;
+    status.set(HotkeyStatus {
+        state: "active".into(),
+        session: status.get().session,
+        binding: Some(binding.clone()),
+        message: None,
+    });
     let store = SettingsStore::new(app.path().app_config_dir().map_err(|e| HotkeyFailure {
         kind: "backend".into(),
         binding: None,
@@ -69,14 +92,35 @@ pub fn set_hotkey(
     })
 }
 
+/// The current [`HotkeyStatus`], shared between the setup thread and the commands.
+pub struct StatusCell(std::sync::Mutex<HotkeyStatus>);
+
+impl StatusCell {
+    pub fn new(status: HotkeyStatus) -> Self {
+        Self(std::sync::Mutex::new(status))
+    }
+
+    pub fn get(&self) -> HotkeyStatus {
+        self.0.lock().expect("status lock").clone()
+    }
+
+    pub fn set(&self, status: HotkeyStatus) {
+        *self.0.lock().expect("status lock") = status;
+    }
+}
+
+/// Emitted when the hotkey state changes after start-up (the portal dialog was answered).
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+pub struct HotkeyStatusChanged(pub HotkeyStatus);
+
 /// Emitted every time the window is shown, so the UI can clear the query without being recreated.
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 pub struct WindowShown;
 
 pub fn builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
-        .commands(collect_commands![app_info, set_hotkey])
-        .events(collect_events![WindowShown])
+        .commands(collect_commands![app_info, hotkey_status, set_hotkey])
+        .events(collect_events![WindowShown, HotkeyStatusChanged])
 }
 
 /// Writes the TypeScript bindings to `path`.

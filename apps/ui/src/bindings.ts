@@ -6,12 +6,14 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 /** Commands */
 export const commands = {
 	appInfo: () => __TAURI_INVOKE<AppInfo>("app_info"),
+	hotkeyStatus: () => __TAURI_INVOKE<HotkeyStatus>("hotkey_status"),
 	/**  Binds a new hotkey and stores it in the settings. A refused binding changes nothing. */
 	setHotkey: (binding: string) => typedError<null, HotkeyFailure>(__TAURI_INVOKE("set_hotkey", { binding })),
 };
 
 /** Events */
 export const events = {
+	hotkeyStatusChanged: makeEvent<HotkeyStatusChanged>("hotkey-status-changed"),
 	windowShown: makeEvent<WindowShown>("window-shown"),
 };
 
@@ -28,6 +30,18 @@ export type HotkeyFailure = {
 	binding: string | null,
 	message: string,
 };
+
+/**  What the UI shows about the hotkey: whether it works, which window system, and why not. */
+export type HotkeyStatus = {
+	/**  `active`, `pending` (waiting for the portal dialog), `unsupported`, or `failed`. */
+	state: string,
+	session: string,
+	binding: string | null,
+	message: string | null,
+};
+
+/**  Emitted when the hotkey state changes after start-up (the portal dialog was answered). */
+export type HotkeyStatusChanged = HotkeyStatus;
 
 /**  Emitted every time the window is shown, so the UI can clear the query without being recreated. */
 export type WindowShown = null;

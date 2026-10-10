@@ -18,6 +18,9 @@ export XDG_CURRENT_DESKTOP=sway
 export WLR_BACKENDS=headless
 export WLR_LIBINPUT_NO_DEVICES=1
 export WLR_RENDERER=pixman
+# Only xdg-desktop-portal-wlr runs here, which has no GlobalShortcuts interface (see the
+# portal_unsupported test of daimos-platform).
+export DAIMOS_EXPECT_NO_PORTAL=1
 unset DISPLAY
 
 cleanup() {
