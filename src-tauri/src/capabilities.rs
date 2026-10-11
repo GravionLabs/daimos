@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
+use daimos_platform::hotkey::{Binding, trigger_matches};
+
 use crate::bindings::HotkeyStatus;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
@@ -43,6 +45,22 @@ Bind the command `daimos toggle` to a key in your compositor:
   GNOME      Settings > Keyboard > Custom Shortcuts: command `daimos toggle`
   KDE Plasma System Settings > Shortcuts > Add Command: `daimos toggle`";
 
+/// The status after `binding` was registered. `reported` is the trigger the system says it uses:
+/// on Wayland the compositor owns the shortcut and may have kept another one than asked for, and
+/// then the status names the real one and says where to change it.
+pub fn bound_status(session: &str, binding: &Binding, reported: Option<String>) -> HotkeyStatus {
+    let (shown, message) = match reported {
+        Some(trigger) if !trigger_matches(binding, &trigger) => (
+            trigger.clone(),
+            Some(format!(
+                "Your desktop keeps {trigger} for Daimos instead of {binding}: on Wayland the compositor owns the shortcut. Change it in the system settings (KDE: Shortcuts, GNOME: Keyboard)."
+            )),
+        ),
+        _ => (binding.to_string(), None),
+    };
+    HotkeyStatus { state: "active".into(), session: session.into(), binding: Some(shown), message }
+}
+
 /// The capabilities for a session (`x11`, `wayland`, `windows`, `macos`), the window mode
 /// (`layer_shell` or `toplevel`) and the state of the hotkey.
 pub fn capabilities(session: &str, window_mode: &str, hotkey: &HotkeyStatus) -> Vec<Capability> {
@@ -68,8 +86,9 @@ fn hotkey_capability(session: &str, hotkey: &HotkeyStatus) -> Capability {
             "Global hotkey",
             Level::Available,
             format!(
-                "Registered through {how}{}.",
-                hotkey.binding.as_ref().map_or(String::new(), |b| format!(" as {b}"))
+                "Registered through {how}{}.{}",
+                hotkey.binding.as_ref().map_or(String::new(), |b| format!(" as {b}")),
+                if message.is_empty() { String::new() } else { format!(" {message}") }
             ),
         ),
         "pending" => capability(
@@ -186,6 +205,39 @@ mod tests {
             hotkey.reason
         );
         assert!(hotkey.instructions.is_none());
+    }
+
+    #[test]
+    fn a_trigger_the_desktop_kept_is_named_and_explained() {
+        let asked = Binding::new("Alt+Space");
+        // The same keys, written the way a portal words them: nothing to say.
+        for same in ["Alt+Space", "<Alt>space", "Alt + Space", "ALT+space"] {
+            let status = bound_status("wayland", &asked, Some(same.into()));
+            assert_eq!(status.message, None, "{same}");
+            assert_eq!(status.binding.as_deref(), Some("Alt+Space"));
+        }
+        assert_eq!(bound_status("x11", &asked, None).message, None);
+
+        let kept = bound_status("wayland", &asked, Some("Meta+K".into()));
+        assert_eq!(kept.state, "active");
+        assert_eq!(kept.binding.as_deref(), Some("Meta+K"));
+        let message = kept.message.clone().unwrap();
+        assert!(
+            message.contains("Meta+K")
+                && message.contains("Alt+Space")
+                && message.contains("system settings"),
+            "{message}"
+        );
+
+        // The settings page shows it as part of the reason.
+        let all = capabilities("wayland", "toplevel", &kept);
+        let reason = &find(&all, "hotkey").reason;
+        assert!(
+            reason.contains("Registered through the XDG GlobalShortcuts portal")
+                && reason.contains("keeps Meta+K"),
+            "{reason}"
+        );
+        assert_eq!(find(&all, "hotkey").level, Level::Available);
     }
 
     #[test]

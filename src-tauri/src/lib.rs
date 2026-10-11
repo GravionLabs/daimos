@@ -189,12 +189,11 @@ fn setup_hotkey(
                     "hotkey {binding} registered {} ms after process start",
                     started.elapsed().as_millis()
                 );
-                HotkeyStatus {
-                    state: "active".into(),
-                    session: session_name,
-                    binding: Some(binding.to_string()),
-                    message: None,
-                }
+                capabilities::bound_status(
+                    &session_name,
+                    &binding,
+                    service.backend().reported_trigger(),
+                )
             }
             Err(error) => {
                 log::warn!("hotkey not registered: {error}");
