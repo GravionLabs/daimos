@@ -11,7 +11,12 @@ tolerance = 0.20
 match = "rank_2000_apps/*"
 p95_ms = 16
 
-# Loading the stored launches at start. The application index adds its own entry when it lands.
+# Loading the stored application list at start (the index is read before the hotkey is registered).
+[[benchmark]]
+match = "index_load_2000/*"
+p95_ms = 20
+
+# Loading the stored launches at start.
 [[benchmark]]
 match = "frecency_load_10k/*"
 p95_ms = 50

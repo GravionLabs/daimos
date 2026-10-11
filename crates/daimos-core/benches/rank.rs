@@ -2,7 +2,9 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use daimos_core::Item;
+use daimos_core::apps::{AppAction, AppEntry};
 use daimos_core::frecency::Frecency;
+use daimos_core::index::AppIndex;
 use daimos_core::ranker::{Candidate, Ranker};
 
 fn apps(n: usize) -> Vec<Item> {
@@ -67,5 +69,30 @@ fn bench_load(c: &mut Criterion) {
     c.bench_function("frecency_load_10k/open", |b| b.iter(|| Frecency::open(&path).unwrap()));
 }
 
-criterion_group!(benches, bench, bench_load);
+/// Loading 2000 stored apps (name, keywords, actions, icon) into memory at start.
+fn bench_index_load(c: &mut Criterion) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.db");
+    let apps: Vec<AppEntry> = (0..2000)
+        .map(|i| AppEntry {
+            id: format!("linux:app{i}.desktop"),
+            name: format!("Application {i}"),
+            generic_name: Some("Generic".into()),
+            keywords: vec!["one".into(), "two".into(), "three".into()],
+            exec: format!("/usr/bin/app{i} --flag"),
+            terminal: false,
+            icon: Some(format!("/usr/share/icons/hicolor/64x64/apps/app{i}.png").into()),
+            actions: vec![AppAction {
+                id: "new".into(),
+                name: "New Window".into(),
+                exec: format!("/usr/bin/app{i} --new"),
+            }],
+        })
+        .collect();
+    AppIndex::open(&path).unwrap().replace("linux", &apps, 1).unwrap();
+    let index = AppIndex::open(&path).unwrap();
+    c.bench_function("index_load_2000/load", |b| b.iter(|| index.load().unwrap()));
+}
+
+criterion_group!(benches, bench, bench_load, bench_index_load);
 criterion_main!(benches);
