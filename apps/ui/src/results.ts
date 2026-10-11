@@ -8,8 +8,9 @@ export const SESSION = 1;
 
 /** The results of the running query, merged from the batches of all providers. */
 export interface Results {
-  /** Providers in the order their first batch arrived. */
+  /** Providers, the heavier ones first, ties in the order their first batch arrived. */
   providers: string[];
+  weights: Record<string, number>;
   byProvider: Record<string, Item[]>;
   /** All items, provider after provider. */
   items: Item[];
@@ -17,7 +18,13 @@ export interface Results {
   selected: string | null;
 }
 
-export const emptyResults: Results = { providers: [], byProvider: {}, items: [], selected: null };
+export const emptyResults: Results = {
+  providers: [],
+  weights: {},
+  byProvider: {},
+  items: [],
+  selected: null,
+};
 
 /**
  * Merges one batch. The first batch of a query (`seq` 0) replaces everything and selects the first
@@ -27,16 +34,25 @@ export const emptyResults: Results = { providers: [], byProvider: {}, items: [],
 export function applyBatch(state: Results, batch: ResultBatch): Results {
   const fresh = batch.seq === 0;
   const base = fresh ? emptyResults : state;
-  const providers = base.providers.includes(batch.provider)
-    ? base.providers
-    : [...base.providers, batch.provider];
+  // The weight is a float: a NaN would arrive as null.
+  const weights = { ...base.weights, [batch.provider]: batch.weight ?? 1 };
+  // `sort` is stable: equal weights keep the order of arrival.
+  const providers = (
+    base.providers.includes(batch.provider) ? base.providers : [...base.providers, batch.provider]
+  ).sort((a, b) => (weights[b] ?? 1) - (weights[a] ?? 1));
   const byProvider = {
     ...base.byProvider,
     [batch.provider]: [...(base.byProvider[batch.provider] ?? []), ...batch.items],
   };
   const items = providers.flatMap((provider) => byProvider[provider] ?? []);
   const keep = !fresh && base.selected !== null && items.some((item) => item.id === base.selected);
-  return { providers, byProvider, items, selected: keep ? base.selected : (items[0]?.id ?? null) };
+  return {
+    providers,
+    weights,
+    byProvider,
+    items,
+    selected: keep ? base.selected : (items[0]?.id ?? null),
+  };
 }
 
 export function selectedIndex(results: Results): number {

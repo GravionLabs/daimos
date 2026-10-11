@@ -31,6 +31,8 @@ allow = [
   "CC0-1.0",
   "0BSD",
   "Unlicense",
+  # webpki-root-certs (the Mozilla CA bundle that ureq verifies the ECB feed against): permissive data license.
+  "CDLA-Permissive-2.0",
 ]
 
 [bans]

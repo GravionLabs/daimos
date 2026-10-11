@@ -65,7 +65,7 @@ export function item(id: string, extra: Partial<Item> = {}): Item {
 }
 
 export function batch(seq: number, items: Item[], provider = "apps"): ResultBatch {
-  return { session: 1, seq, provider, items, done: false };
+  return { session: 1, seq, provider, items, done: false, weight: 1 };
 }
 
 /** `list[index]`, failing the test instead of returning undefined. */

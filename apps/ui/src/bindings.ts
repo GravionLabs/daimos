@@ -123,6 +123,8 @@ export type ResultBatch = {
 	provider: string,
 	items: Item[],
 	done: boolean,
+	/**  The provider's weight; the UI lists providers with a higher weight first. */
+	weight: number | null,
 };
 
 /**  Emitted when the OS theme or the theme setting changes. */

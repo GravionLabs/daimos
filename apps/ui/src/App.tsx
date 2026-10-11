@@ -99,6 +99,7 @@ export function App(props: { host?: Host }) {
         provider,
         items: view.items,
         done: true,
+        weight: 1,
       });
       push({ kind: "list", title, provider, results, first: 0 });
     } else if (view.type === "detail") {

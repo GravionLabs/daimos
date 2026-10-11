@@ -19,7 +19,7 @@ use crate::provider::{Provider, QueryContext};
 pub const DEFAULT_BUDGET: Duration = Duration::from_millis(100);
 
 /// One event for the UI. `seq` increases per query; the last batch of a provider has `done`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultBatch {
     pub session: u32,
@@ -27,6 +27,8 @@ pub struct ResultBatch {
     pub provider: String,
     pub items: Vec<Item>,
     pub done: bool,
+    /// The provider's weight; the UI lists providers with a higher weight first.
+    pub weight: f32,
 }
 
 pub type Sink = Arc<dyn Fn(ResultBatch) + Send + Sync>;
@@ -135,6 +137,7 @@ async fn run_provider(
     sink: Sink,
 ) {
     let id = provider.id().to_owned();
+    let weight = provider.weight();
     let cancel = ctx.cancel.clone();
     let deadline = Instant::now() + provider.budget();
     let mut stream = provider.query(ctx);
@@ -145,7 +148,7 @@ async fn run_provider(
             return;
         }
         let seq = running.seq.fetch_add(1, Ordering::SeqCst);
-        sink(ResultBatch { session, seq, provider: id.clone(), items, done });
+        sink(ResultBatch { session, seq, provider: id.clone(), items, done, weight });
     };
 
     loop {
@@ -163,10 +166,10 @@ async fn run_provider(
         }
     }
     // The budget cut-off cancels only the child token, so the query itself still reports.
-    emit_done(&running, &sink, session, &id);
+    emit_done(&running, &sink, session, &id, weight);
 }
 
-fn emit_done(running: &Running, sink: &Sink, session: u32, provider: &str) {
+fn emit_done(running: &Running, sink: &Sink, session: u32, provider: &str, weight: f32) {
     if running.cancel.is_cancelled() {
         return;
     }
@@ -177,6 +180,7 @@ fn emit_done(running: &Running, sink: &Sink, session: u32, provider: &str) {
         provider: provider.to_owned(),
         items: Vec::new(),
         done: true,
+        weight,
     });
 }
 
