@@ -5,7 +5,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) and GitVersion (Gi
 
 ---
 
-## [0.2.0] — 2026-10-11
+## [0.1.0-beta.48] — 2026-10-11
 
 ### Bug Fixes
 - Measure memory as PSS, footprint or private working set instead of RSS (#103) (#106)
@@ -16,6 +16,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) and GitVersion (Gi
 
 ### Documentation
 - Docs site with Starlight, deployed to GitHub Pages (#114) (#75)
+- Update CHANGELOG.md for v0.2.0
 
 
 ### Features
