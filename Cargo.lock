@@ -1036,12 +1036,18 @@ name = "daimos-platform"
 version = "0.1.0"
 dependencies = [
  "ashpd",
+ "block2",
  "daimos-core",
  "freedesktop-desktop-entry",
  "freedesktop-icons",
  "futures-util",
  "gtk-layer-shell",
  "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-foundation",
  "png 0.18.1",
  "serde",
  "tauri",
