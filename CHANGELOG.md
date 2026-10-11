@@ -5,18 +5,20 @@ Versioning follows [Semantic Versioning](https://semver.org/) and GitVersion (Gi
 
 ---
 
-## [0.1.0-beta.48] — 2026-10-11
+## [0.2.0-beta.25] — 2026-10-11
 
 ### Bug Fixes
 - Measure memory as PSS, footprint or private working set instead of RSS (#103) (#106)
 - Hold show and query until the UI listens and replay them (#105) (#107)
 - Offer a changed hotkey to the Wayland portal and report what it kept (#104) (#108)
 - Settings button, label spacing and search outline (#122)
+- Next-version 0.2.0 so release/0.2 is numbered 0.2.0-beta.n
 
 
 ### Documentation
 - Docs site with Starlight, deployed to GitHub Pages (#114) (#75)
 - Update CHANGELOG.md for v0.2.0
+- A minor release needs +semver: minor in a commit message
 
 
 ### Features
