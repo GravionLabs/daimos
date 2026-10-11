@@ -2,9 +2,10 @@
 //! is told about every new selection, whichever window has the focus (sway, Hyprland, niri, KDE
 //! Plasma).
 //!
-//! GNOME's compositor has no such protocol. There [`WaylandClipboard::support`] reports `Limited`
-//! and [`WaylandClipboard::watch`] only waits, so nothing is recorded yet. Recording while the
-//! Daimos window is focused is a separate piece of work.
+//! GNOME's compositor (Mutter) has no such protocol, but it mirrors the clipboard to Xwayland. There
+//! the X11 backend follows the clipboard through the X server that Xwayland provides: it sees copies
+//! of Wayland-native applications too, whichever window has the focus. Without the protocol and
+//! without an X server nothing can be recorded and the backend is `Unsupported`.
 
 use std::collections::HashMap;
 use std::io::{self, Read};
@@ -13,6 +14,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use super::x11::X11Clipboard;
 use daimos_core::clipboard::{
     ClipboardBackend, ClipboardContent, ClipboardSink, ClipboardSnapshot, ClipboardSupport,
 };
@@ -49,17 +51,18 @@ impl WaylandClipboard {
 
 impl ClipboardBackend for WaylandClipboard {
     fn id(&self) -> &str {
-        "wlr-data-control"
+        "wayland"
     }
 
     fn support(&self) -> ClipboardSupport {
         match Self::has_data_control() {
             Ok(true) => ClipboardSupport::Full,
-            Ok(false) => ClipboardSupport::Limited(
-                "this compositor has no wlr-data-control (GNOME), so copied content is not \
-                 recorded yet"
-                    .into(),
-            ),
+            Ok(false) => match X11Clipboard.support() {
+                ClipboardSupport::Unsupported(reason) => ClipboardSupport::Unsupported(format!(
+                    "this compositor has no wlr-data-control and Xwayland is not available ({reason})"
+                )),
+                support => support,
+            },
             Err(reason) => ClipboardSupport::Unsupported(reason),
         }
     }
@@ -69,10 +72,9 @@ impl ClipboardBackend for WaylandClipboard {
         let (globals, mut queue) = registry_queue_init::<State>(&conn).map_err(io::Error::other)?;
         let qh = queue.handle();
         let Ok(manager) = globals.bind::<ZwlrDataControlManagerV1, _, _>(&qh, 1..=2, ()) else {
-            while !stop.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            return Ok(());
+            // GNOME: Mutter mirrors the clipboard to Xwayland, so the X11 backend sees it.
+            log::info!("no wlr-data-control: following the clipboard through Xwayland");
+            return X11Clipboard.watch(sink, stop);
         };
         let seat = globals
             .bind::<wl_seat::WlSeat, _, _>(&qh, 1..=2, ())
