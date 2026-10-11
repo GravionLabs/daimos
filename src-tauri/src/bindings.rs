@@ -1,7 +1,9 @@
 //! Commands and events the webview can use. `apps/ui/src/bindings.ts` is generated from this
 //! module (`pnpm bindings`) and checked in; a test fails when the file is stale.
 
+use daimos_core::query::ResultBatch;
 use daimos_core::settings::SettingsStore;
+use daimos_core::{QueryEngine, View};
 use daimos_platform::hotkey::{Binding, HotkeyError, HotkeyService};
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -199,6 +201,18 @@ pub struct QuerySet(pub String);
 #[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
 pub struct WindowShown;
 
+/// One batch of results for a query session; see `ResultBatch` for the fields.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+pub struct QueryResults(pub ResultBatch);
+
+/// Starts a query for `session` and cancels the session's previous one. The answer streams in
+/// as `QueryResults` events.
+#[tauri::command]
+#[specta::specta]
+pub fn query(engine: State<'_, std::sync::Arc<QueryEngine>>, session: u32, text: String) {
+    engine.query(session, &text);
+}
+
 pub fn builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
         .commands(collect_commands![
@@ -207,9 +221,17 @@ pub fn builder() -> Builder<tauri::Wry> {
             set_hotkey,
             hide_window,
             resize_window,
-            first_paint
+            first_paint,
+            query
         ])
-        .events(collect_events![WindowShown, HotkeyStatusChanged, QuerySet, OpenSettings])
+        .events(collect_events![
+            WindowShown,
+            HotkeyStatusChanged,
+            QuerySet,
+            OpenSettings,
+            QueryResults
+        ])
+        .typ::<View>()
 }
 
 /// Writes the TypeScript bindings to `path`.
