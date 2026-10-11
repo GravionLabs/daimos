@@ -80,13 +80,36 @@ fn setup_query_engine(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
             log::warn!("cannot send results: {error}");
         }
     });
-    let providers: Vec<Arc<dyn daimos_core::Provider>> =
-        vec![Arc::new(AppsProvider::new(Arc::clone(&index), Arc::clone(&frecency)))];
+    // Exchange rates: the cached ones now, a fresh copy from the ECB in the background.
+    let rates =
+        Arc::new(daimos_core::calc::rates::RatesCache::open(Some(data_dir.join("rates.json"))));
+    refresh_rates_in_background(&rates);
+    let providers: Vec<Arc<dyn daimos_core::Provider>> = vec![
+        Arc::new(daimos_core::calc::provider::CalcProvider::new(rates)),
+        Arc::new(AppsProvider::new(Arc::clone(&index), Arc::clone(&frecency))),
+    ];
     app.manage(Arc::new(daimos_core::actions::ActionRunner::new(Arc::clone(&index), frecency)));
     let runtime = tauri::async_runtime::handle();
     app.manage(Arc::new(daimos_core::QueryEngine::new(providers, sink, runtime.inner().clone())));
     app.manage(index);
     Ok(())
+}
+
+/// Fetches the daily exchange rates when the cached ones are missing or old. Offline is fine: the
+/// calculator then uses what it has, and the item says how old that is.
+fn refresh_rates_in_background(rates: &Arc<daimos_core::calc::rates::RatesCache>) {
+    let rates = Arc::clone(rates);
+    let _ = std::thread::Builder::new().name("daimos-rates".into()).spawn(move || {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+        match rates.refresh(now, daimos_core::calc::rates::fetch_ecb) {
+            Ok(()) => {
+                log::info!("exchange rates of {}", rates.get().map_or("none".into(), |r| r.date))
+            }
+            Err(error) => log::info!("no fresh exchange rates ({error}); using the cached ones"),
+        }
+    });
 }
 
 /// The application sources of this OS.

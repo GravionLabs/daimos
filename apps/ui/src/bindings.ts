@@ -118,6 +118,8 @@ export type ResultBatch = {
 	provider: string,
 	items: Item[],
 	done: boolean,
+	/**  The provider's weight; the UI lists providers with a higher weight first. */
+	weight: number | null,
 };
 
 /**  What a provider answers with. Views are data; the webview renders them. */

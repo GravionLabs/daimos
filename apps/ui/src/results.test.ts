@@ -23,8 +23,14 @@ function item(id: string, title = id): Item {
   };
 }
 
-function batch(seq: number, provider: string, ids: string[], done = false): ResultBatch {
-  return { session: 1, seq, provider, items: ids.map((id) => item(id)), done };
+function batch(
+  seq: number,
+  provider: string,
+  ids: string[],
+  done = false,
+  weight = 1,
+): ResultBatch {
+  return { session: 1, seq, provider, items: ids.map((id) => item(id)), done, weight };
 }
 
 const ids = (items: Item[]) => items.map((i) => i.id);
@@ -54,6 +60,22 @@ describe("applyBatch", () => {
     // Within a query, a merge never removes items, so the selection stays; if it did vanish ...
     const gone: typeof state = { ...state, selected: "zzz" };
     expect(applyBatch(gone, batch(1, "calc", ["q"])).selected).toBe("a");
+  });
+
+  it("lists heavier providers first whatever arrived first", () => {
+    let state = applyBatch(emptyResults, batch(0, "apps", ["a", "b"]));
+    state = applyBatch(state, batch(1, "calc", ["result"], false, 10));
+    expect(ids(state.items)).toEqual(["result", "a", "b"]);
+    // The selection stays on what it was on; the first item of the next query is the heavy one.
+    expect(state.selected).toBe("a");
+    expect(applyBatch(state, batch(0, "apps", ["a"])).selected).toBe("a");
+  });
+
+  it("keeps the order of arrival for equal weights", () => {
+    let state = applyBatch(emptyResults, batch(0, "x", ["1"]));
+    state = applyBatch(state, batch(1, "y", ["2"]));
+    state = applyBatch(state, batch(2, "x", ["3"]));
+    expect(ids(state.items)).toEqual(["1", "3", "2"]);
   });
 
   it("a new query replaces the old results at its first batch", () => {
