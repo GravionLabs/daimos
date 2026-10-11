@@ -4,6 +4,7 @@ pub mod bindings;
 mod capabilities;
 mod ipc_server;
 mod tray;
+mod ui_ready;
 mod window_control;
 
 use daimos_core::settings::SettingsStore;

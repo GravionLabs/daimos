@@ -12,6 +12,11 @@ export const commands = {
 	setHotkey: (binding: string) => typedError<null, HotkeyFailure>(__TAURI_INVOKE("set_hotkey", { binding })),
 	/**  The UI hides the window (`Esc` with an empty query). */
 	hideWindow: () => __TAURI_INVOKE<void>("hide_window"),
+	/**
+	 *  The UI listens to events now: what was sent before (a `daimos show \"text\"` right after the
+	 *  start) is replayed.
+	 */
+	uiReady: () => __TAURI_INVOKE<void>("ui_ready"),
 	/**  The UI reports how many result rows it shows; the window grows or shrinks to fit. */
 	resizeWindow: (rows: number) => __TAURI_INVOKE<void>("resize_window", { rows }),
 	/**  The UI painted the first frame after a show: logs the time from the hotkey event to now. */

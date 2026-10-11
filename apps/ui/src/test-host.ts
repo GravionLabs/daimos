@@ -63,6 +63,7 @@ export function fakeHost() {
         results = undefined;
       };
     },
+    ready: vi.fn(() => Promise.resolve()),
     firstPaint: vi.fn(),
     copy: vi.fn(() => Promise.resolve()),
     theme: vi.fn(() =>
