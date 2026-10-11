@@ -71,8 +71,12 @@ impl Provider for AppsProvider {
             now,
             LIMIT,
         );
-        let batch =
-            ItemBatch::from(ranked.into_iter().map(|r| items[r.index].clone()).collect::<Vec<_>>());
+        let batch = ItemBatch::from(
+            ranked
+                .into_iter()
+                .map(|r| Item { highlight: r.title_indices, ..items[r.index].clone() })
+                .collect::<Vec<_>>(),
+        );
         stream::once(async move { batch }).boxed()
     }
 }
@@ -141,6 +145,8 @@ mod tests {
         );
         let titles = |items: Vec<Item>| items.into_iter().map(|i| i.title).collect::<Vec<_>>();
         assert_eq!(titles(run(&provider, "fi").await), ["Files", "Firefox"]);
+        // The matched characters of the title come with the item.
+        assert_eq!(run(&provider, "ffx").await[0].highlight, [0, 4, 6]);
         for _ in 0..3 {
             frecency.record("fake:ff", now()).unwrap();
         }

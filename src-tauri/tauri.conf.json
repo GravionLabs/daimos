@@ -30,8 +30,14 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$APPCACHE/icons/**",
-          "$CACHE/daimos/icons/**"
+          "$APPDATA/icons/**",
+          "$DATA/icons/**",
+          "$DATA/flatpak/exports/**",
+          "/usr/share/icons/**",
+          "/usr/share/pixmaps/**",
+          "/var/lib/flatpak/exports/**",
+          "/var/lib/snapd/desktop/**",
+          "/snap/*/*/**"
         ]
       },
       "devCsp": null

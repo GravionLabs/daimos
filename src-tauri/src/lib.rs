@@ -81,7 +81,8 @@ fn setup_query_engine(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
         }
     });
     let providers: Vec<Arc<dyn daimos_core::Provider>> =
-        vec![Arc::new(AppsProvider::new(Arc::clone(&index), frecency))];
+        vec![Arc::new(AppsProvider::new(Arc::clone(&index), Arc::clone(&frecency)))];
+    app.manage(Arc::new(daimos_core::actions::ActionRunner::new(Arc::clone(&index), frecency)));
     let runtime = tauri::async_runtime::handle();
     app.manage(Arc::new(daimos_core::QueryEngine::new(providers, sink, runtime.inner().clone())));
     app.manage(index);

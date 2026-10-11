@@ -58,6 +58,9 @@ pub struct Item {
     pub accessories: Vec<String>,
     pub actions: Vec<Action>,
     pub detail: Option<Detail>,
+    /// Positions (in characters) of the title that matched the query, for highlighting.
+    #[serde(default)]
+    pub highlight: Vec<u32>,
 }
 
 impl Item {
@@ -71,6 +74,7 @@ impl Item {
             accessories: Vec::new(),
             actions: Vec::new(),
             detail: None,
+            highlight: Vec::new(),
         }
     }
 }

@@ -20,6 +20,11 @@ export const commands = {
 	 *  as `QueryResults` events.
 	 */
 	query: (session: number, text: string) => __TAURI_INVOKE<void>("query", { session, text }),
+	/**
+	 *  Runs an action of a result (`Enter` runs `open`). The window hides after a successful start,
+	 *  so the application that was launched can take the focus.
+	 */
+	runAction: (itemId: string, actionId: string) => typedError<null, string>(__TAURI_INVOKE("run_action", { itemId, actionId })),
 };
 
 /** Events */
@@ -89,6 +94,8 @@ export type Item = {
 	accessories: string[],
 	actions: Action[],
 	detail: Detail | null,
+	/**  Positions (in characters) of the title that matched the query, for highlighting. */
+	highlight?: number[],
 };
 
 /**  The tray item `Settings` was chosen; the UI opens the settings page (M1). */

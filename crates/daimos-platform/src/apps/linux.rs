@@ -162,19 +162,23 @@ impl LinuxAppSource {
     }
 
     /// An absolute `Icon` is used as is; a name goes through the theme lookup, then falls back to
-    /// the generic application icon.
+    /// the generic application icon. The result is the real file: icon themes are full of
+    /// (relative) symlinks, and the web view's asset protocol cannot follow those.
     fn icon(&self, icon: Option<&str>) -> Option<PathBuf> {
-        if let Some(icon) = icon.map(str::trim).filter(|i| !i.is_empty()) {
-            let path = Path::new(icon);
-            if path.is_absolute() {
-                if path.is_file() {
-                    return Some(path.to_owned());
+        let found = (|| {
+            if let Some(icon) = icon.map(str::trim).filter(|i| !i.is_empty()) {
+                let path = Path::new(icon);
+                if path.is_absolute() {
+                    if path.is_file() {
+                        return Some(path.to_owned());
+                    }
+                } else if let Some(found) = self.lookup(icon) {
+                    return Some(found);
                 }
-            } else if let Some(found) = self.lookup(icon) {
-                return Some(found);
             }
-        }
-        self.lookup(FALLBACK_ICON)
+            self.lookup(FALLBACK_ICON)
+        })()?;
+        Some(std::fs::canonicalize(&found).unwrap_or(found))
     }
 
     fn lookup(&self, name: &str) -> Option<PathBuf> {
