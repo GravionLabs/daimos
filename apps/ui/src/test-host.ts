@@ -27,6 +27,10 @@ export function fakeHost() {
     },
     firstPaint: vi.fn(),
     copy: vi.fn(() => Promise.resolve()),
+    theme: vi.fn(() =>
+      Promise.resolve({ setting: "system" as const, system: "light", accent: null }),
+    ),
+    onTheme: vi.fn(() => () => {}),
     loadView: vi.fn(() => Promise.reject(new Error("no view"))),
     submitForm: vi.fn(() => Promise.resolve()),
     query: vi.fn(),

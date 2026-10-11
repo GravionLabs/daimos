@@ -94,6 +94,19 @@ jobs:
           cargo build -p daimos-app -p daimos-cli --features custom-protocol
           export WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1
           MEASURE_LABEL="Ubuntu X11" xvfb-run --auto-servernum python3 scripts/ci/measure-app.py
+      # Both color schemes of the palette, for a look at the pull request (#48).
+      - name: Screenshots of both themes (X11)
+        if: matrix.session == 'x11'
+        run: |
+          sudo apt-get install -y imagemagick
+          xvfb-run --auto-servernum -s "-screen 0 1280x800x24" scripts/ci/screenshots.sh
+      - name: Upload the screenshots
+        if: matrix.session == 'x11'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: theme-screenshots
+          path: target/screenshots/*.png
+          if-no-files-found: error
       - name: Measure the app (headless sway)
         if: matrix.session == 'wayland'
         run: |

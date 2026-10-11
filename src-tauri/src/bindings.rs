@@ -2,7 +2,7 @@
 //! module (`pnpm bindings`) and checked in; a test fails when the file is stale.
 
 use daimos_core::query::ResultBatch;
-use daimos_core::settings::SettingsStore;
+use daimos_core::settings::{SettingsStore, ThemeSetting};
 use daimos_core::{QueryEngine, View};
 use daimos_platform::hotkey::{Binding, HotkeyError, HotkeyService};
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,57 @@ pub fn submit_form(
     values: std::collections::HashMap<String, String>,
 ) -> Result<(), String> {
     engine.submit(&provider, &view_id, &values)
+}
+
+/// The color scheme and accent the UI should use right now.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ThemeInfo {
+    /// What the user chose in the settings: `system`, `light` or `dark`.
+    pub setting: ThemeSetting,
+    /// The scheme of the OS, `light` or `dark`; the UI uses it while the setting is `system`.
+    pub system: String,
+    /// The accent color of the OS as `#rrggbb`; `None` where the OS has none (Linux).
+    pub accent: Option<String>,
+}
+
+/// Emitted when the OS theme or the theme setting changes.
+#[derive(Debug, Clone, Serialize, Deserialize, Type, Event)]
+pub struct ThemeChanged(pub ThemeInfo);
+
+fn config_store(app: &AppHandle) -> Result<SettingsStore, String> {
+    app.path().app_config_dir().map(SettingsStore::new).map_err(|e| e.to_string())
+}
+
+pub fn theme_info(app: &AppHandle) -> ThemeInfo {
+    let setting = config_store(app)
+        .ok()
+        .and_then(|s| s.load().ok())
+        .map_or(ThemeSetting::System, |s| s.theme);
+    let system = match app.get_webview_window("main").and_then(|w| w.theme().ok()) {
+        Some(tauri::Theme::Dark) => "dark",
+        _ => "light",
+    };
+    ThemeInfo { setting, system: system.into(), accent: daimos_platform::accent::system_accent() }
+}
+
+/// The theme the UI applies at start and on every show.
+#[tauri::command]
+#[specta::specta]
+pub fn theme(app: AppHandle) -> ThemeInfo {
+    theme_info(&app)
+}
+
+/// Forces a color scheme (or `system`) and tells the UI.
+#[tauri::command]
+#[specta::specta]
+pub fn set_theme(app: AppHandle, setting: ThemeSetting) -> Result<ThemeInfo, String> {
+    let store = config_store(&app)?;
+    let mut settings = store.load().unwrap_or_default();
+    settings.theme = setting;
+    store.save(&settings).map_err(|e| e.to_string())?;
+    let info = theme_info(&app);
+    let _ = ThemeChanged(info.clone()).emit(&app);
+    Ok(info)
 }
 
 /// The UI reports how many result rows it shows; the window grows or shrinks to fit.
@@ -269,14 +320,17 @@ pub fn builder() -> Builder<tauri::Wry> {
             query,
             run_action,
             load_view,
-            submit_form
+            submit_form,
+            theme,
+            set_theme
         ])
         .events(collect_events![
             WindowShown,
             HotkeyStatusChanged,
             QuerySet,
             OpenSettings,
-            QueryResults
+            QueryResults,
+            ThemeChanged
         ])
         .typ::<View>()
 }
