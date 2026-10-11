@@ -1,0 +1,465 @@
+:root {
+  color-scheme: light dark;
+  /* Light scheme. The dark scheme below is used when the OS asks for it and nothing is forced. */
+  --bg: #ffffff;
+  --fg: #1c1c1e;
+  --muted: #5c5c63;
+  --accent: #3f4fd8;
+  --selected: #e3e6ff;
+  --error: #b3261e;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #1e1e20;
+    --fg: #f2f2f7;
+    --muted: #a0a0a8;
+    --accent: #8c9bff;
+    --selected: #2c2f4a;
+    --error: #ff7b72;
+  }
+}
+
+/* The scheme the app applies (`data-theme`), whether forced in the settings or taken from the OS. */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1e1e20;
+  --fg: #f2f2f7;
+  --muted: #a0a0a8;
+  --accent: #8c9bff;
+  --selected: #2c2f4a;
+  --error: #ff7b72;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font:
+    16px / 1.4 system-ui,
+    sans-serif;
+}
+
+.palette {
+  padding: 12px;
+}
+
+.search {
+  width: 100%;
+  /* 52px + the 12px padding of .palette twice = the 76px search row the window is sized for */
+  height: 52px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  outline: 2px solid transparent;
+  background: transparent;
+  color: inherit;
+  font-size: 1.25rem;
+}
+
+.search:focus {
+  outline-color: var(--accent);
+}
+
+.search::placeholder {
+  color: var(--muted);
+}
+
+.results {
+  scrollbar-width: thin;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.spacer {
+  position: relative;
+}
+
+.row {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 14px;
+  border-radius: 8px;
+  cursor: default;
+}
+
+.row[data-selected="true"] {
+  background: var(--selected);
+}
+
+.icon {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  object-fit: contain;
+}
+
+.icon.placeholder {
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--selected);
+  color: var(--muted);
+  font-weight: 600;
+}
+
+.text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.title,
+.subtitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.subtitle {
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.title mark {
+  background: none;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.accessory {
+  flex: none;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .row {
+    transition: background-color 80ms;
+  }
+}
+
+.split {
+  display: flex;
+  gap: 8px;
+}
+
+.split > .results {
+  flex: 1;
+  min-width: 0;
+}
+
+.split[data-detail="true"] > .results {
+  flex: 0 0 42%;
+}
+
+.detail {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 416px;
+  padding: 4px 12px;
+  border-left: 1px solid var(--selected);
+  font-size: 0.875rem;
+}
+
+.detail dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.detail dd {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+
+.detail pre,
+.detail code {
+  font-family: ui-monospace, monospace;
+}
+
+.detail pre {
+  overflow-x: auto;
+}
+
+.md-heading {
+  font-weight: 600;
+}
+
+.empty {
+  color: var(--muted);
+}
+
+.crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 52px;
+  padding: 0 14px;
+  font-size: 1.125rem;
+}
+
+.back {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.actions {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  min-width: 260px;
+  padding: 8px;
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 4px 24px rgb(0 0 0 / 0.35);
+}
+
+.action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 6px;
+}
+
+.action[data-selected="true"] {
+  background: var(--selected);
+}
+
+kbd {
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.75rem;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 14px 12px;
+}
+
+.form .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form input {
+  padding: 8px 10px;
+  border: 1px solid var(--selected);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.form input[aria-invalid="true"] {
+  border-color: var(--error);
+}
+
+.error {
+  color: var(--error);
+  font-size: 0.8125rem;
+}
+
+.toast {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--fg);
+  color: var(--bg);
+  font-size: 0.8125rem;
+}
+
+.palette {
+  position: relative;
+}
+
+/* Motion is a nicety: with the OS setting for reduced motion there are no transitions or animations. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    /* biome-ignore lint/complexity/noImportantStyles: the standard reset must beat every component rule */
+    transition: none !important;
+    /* biome-ignore lint/complexity/noImportantStyles: same reset */
+    animation: none !important;
+  }
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.settings {
+  max-height: 468px;
+  overflow-y: auto;
+}
+
+.settings-body {
+  padding: 0 14px 12px;
+}
+
+.settings h3 {
+  margin: 16px 0 6px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.settings ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings input[type="number"],
+.alias-form input {
+  padding: 4px 8px;
+  border: 1px solid var(--selected);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.settings input[type="number"] {
+  width: 5rem;
+}
+
+.settings button {
+  padding: 4px 10px;
+  border: 1px solid var(--selected);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.themes {
+  display: flex;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.providers li,
+.aliases li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.providers .weight {
+  margin-left: auto;
+}
+
+.alias,
+.target {
+  font-family: ui-monospace, monospace;
+}
+
+.alias-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.alias-form input {
+  flex: 1;
+  min-width: 0;
+}
+
+.hint {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.recorder {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.recorder-button {
+  min-width: 10rem;
+  font-family: ui-monospace, monospace;
+}
+
+.recorder-button[data-recording="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.capabilities li {
+  padding: 6px 0;
+}
+
+.capabilities p {
+  margin: 2px 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.capabilities pre {
+  margin: 4px 0 0;
+  padding: 8px;
+  overflow-x: auto;
+  border-radius: 6px;
+  background: var(--selected);
+  font-size: 0.75rem;
+}
+
+.level {
+  margin-left: 8px;
+  font-size: 0.75rem;
+}
+
+.capabilities li[data-level="available"] .level {
+  color: var(--accent);
+}
+
+.capabilities li[data-level="unavailable"] .level {
+  color: var(--error);
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}

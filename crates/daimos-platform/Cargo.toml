@@ -1,0 +1,88 @@
+[package]
+name = "daimos-platform"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+repository.workspace = true
+
+[dependencies]
+daimos-core = { path = "../daimos-core" }
+log = "0.4.34"
+serde = { version = "1.0.229", features = ["derive"] }
+tauri = "2.12.2"
+tauri-plugin-global-shortcut = "2.4.1"
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tauri = { version = "2.12.2", features = ["test"] }
+tauri-plugin-global-shortcut = "2.4.1"
+tempfile = "3.27.0"
+
+[lints]
+workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "global_shortcuts"] }
+freedesktop-desktop-entry = "0.8.3"
+freedesktop-icons = "0.4.0"
+futures-util = "0.3.34"
+gtk-layer-shell = { version = "0.8.2", features = ["v0_6"], optional = true }
+tokio = { version = "1.53.2", features = ["rt", "sync", "time", "macros"] }
+
+[target."cfg(windows)".dependencies]
+png = "0.18.1"
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_WinRT",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+    "UI",
+    "UI_ViewManagement",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri-nspanel = "2.1"
+block2 = "0.6"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "block2",
+    "NSColor",
+    "NSColorSpace",
+    "NSGraphicsContext",
+    "NSImage",
+    "NSImageRep",
+    "NSRunningApplication",
+    "NSWorkspace",
+] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFCGTypes"] }
+objc2-core-graphics = { version = "0.3", default-features = false, features = [
+    "std",
+    "CGBitmapContext",
+    "CGColorSpace",
+    "CGContext",
+    "CGImage",
+] }
+objc2-foundation = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSBundle",
+    "NSDictionary",
+    "NSGeometry",
+    "NSString",
+    "NSURL",
+    "NSValue",
+] }
+png = "0.18.1"
+
+[features]
+# wlr-layer-shell overlay on Wayland; needs libgtk-layer-shell-dev at build time (see README).
+default = ["layer-shell"]
+layer-shell = ["dep:gtk-layer-shell"]

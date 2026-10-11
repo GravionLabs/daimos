@@ -1,0 +1,143 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # `labeled`: adding the full-matrix label starts the run again with all platforms.
+    types: [opened, synchronize, reopened, labeled]
+
+permissions:
+  contents: read
+
+# A newer push to a pull request makes the running checks obsolete. A push to main is not cancelled.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # Packages Tauri needs on Linux (see README.md).
+  LINUX_PACKAGES: >-
+    libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev libgtk-layer-shell-dev
+    librsvg2-dev libssl-dev pkg-config build-essential
+
+jobs:
+  verify:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS and Windows runners cost 10x and 2x a Linux minute: a pull request into a release
+        # branch runs the Linux job with headless sway only. The full matrix (plus Windows and macOS)
+        # runs for pull requests into main (the release PR), for pushes to main, and for pull requests
+        # with the `full-matrix` label. The X11 job runs only when asked for: add the `x11` label.
+        include: ${{ fromJSON((github.event_name == 'push' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-matrix')) && (contains(github.event.pull_request.labels.*.name, 'x11') && '[{"name":"Ubuntu (X11)","os":"ubuntu-latest","session":"x11"},{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"},{"name":"Windows","os":"windows-latest","session":"native"},{"name":"macOS","os":"macos-latest","session":"native"}]' || '[{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"},{"name":"Windows","os":"windows-latest","session":"native"},{"name":"macOS","os":"macos-latest","session":"native"}]') || (contains(github.event.pull_request.labels.*.name, 'x11') && '[{"name":"Ubuntu (X11)","os":"ubuntu-latest","session":"x11"},{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"}]' || '[{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"}]')) }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Linux packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y $LINUX_PACKAGES xvfb
+      - name: Install sway and the portals
+        if: matrix.session == 'wayland'
+        run: sudo apt-get install -y sway xdg-desktop-portal xdg-desktop-portal-wlr dbus-daemon
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        with:
+          key: ${{ matrix.session }}
+      - run: pnpm install --frozen-lockfile
+      # The Rust crates embed apps/ui/dist, so the UI is built first.
+      - run: pnpm build
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Rust tests (X11)
+        if: matrix.session == 'x11'
+        run: xvfb-run --auto-servernum cargo test --workspace
+      - name: Rust tests (headless sway)
+        if: matrix.session == 'wayland'
+        run: scripts/ci/run-in-sway.sh cargo test --workspace
+      - name: Rust tests
+        if: matrix.session == 'native'
+        run: cargo test --workspace
+      - run: pnpm lint
+      - run: pnpm test
+      # The real app, driven by the CLI (the criteria of the PBIs for the CLI, layer-shell and NSPanel).
+      - name: App check (headless sway)
+        if: matrix.session == 'wayland'
+        run: |
+          cargo build -p daimos-app -p daimos-cli
+          scripts/ci/run-in-sway.sh scripts/ci/sway-app-check.sh
+      - name: App check (macOS focus)
+        if: runner.os == 'macOS'
+        run: |
+          cargo build -p daimos-app -p daimos-cli
+          scripts/ci/macos-focus-check.sh
+      # The budget of docs/specs/product-spec.md: criterion benchmarks against budget.toml (a pull
+      # request fails when one exceeds its threshold by more than 20 %).
+      - name: Benchmarks against the budget
+        shell: bash
+        run: |
+          cargo bench -p daimos-core --bench rank -- --warm-up-time 1 --measurement-time 3
+          python="$(command -v python3 || command -v python)"
+          "$python" scripts/ci/check-budget.py
+      # Informational until a baseline exists: first paint, cold start and resident memory of the
+      # real app, printed in the job summary.
+      - name: Measure the app (X11)
+        if: matrix.session == 'x11'
+        run: |
+          cargo build -p daimos-app -p daimos-cli --features custom-protocol
+          export WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1
+          MEASURE_LABEL="Ubuntu X11" xvfb-run --auto-servernum python3 scripts/ci/measure-app.py
+      - name: Measure the app (headless sway)
+        if: matrix.session == 'wayland'
+        run: |
+          cargo build -p daimos-app -p daimos-cli --features custom-protocol
+          export WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1 GDK_BACKEND=wayland
+          MEASURE_LABEL="Ubuntu Wayland (sway)" scripts/ci/run-in-sway.sh python3 scripts/ci/measure-app.py
+      # Both color schemes of the palette, for a look at the pull request (#48).
+      - name: Screenshots of both themes
+        if: matrix.session == 'wayland'
+        run: |
+          sudo apt-get install -y imagemagick
+          xvfb-run --auto-servernum -s "-screen 0 1280x800x24" scripts/ci/screenshots.sh
+      - name: Upload the screenshots
+        if: matrix.session == 'wayland'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: theme-screenshots
+          path: target/screenshots/*.png
+          if-no-files-found: error
+      - name: Measure the app
+        if: matrix.session == 'native'
+        shell: bash
+        run: |
+          cargo build -p daimos-app -p daimos-cli --features custom-protocol
+          python="$(command -v python3 || command -v python)"
+          MEASURE_LABEL="${{ matrix.name }}" "$python" scripts/ci/measure-app.py
+      # `pnpm test` also checks that apps/ui/src/bindings.ts is current (bindings:check).
+      # rpm bundling hangs on the runner and AppImage needs extra tools: the debug bundle on Linux is
+      # the deb; the full set of packages is the v1.0 packaging work.
+      - name: Debug bundle
+        if: matrix.session != 'x11'
+        run: pnpm tauri build --debug ${{ runner.os == 'Linux' && '--bundles deb' || '' }}
+      - name: Upload the debug bundle
+        if: matrix.session != 'x11'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: daimos-debug-${{ matrix.os }}
+          path: target/debug/bundle/**
+          if-no-files-found: error
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2

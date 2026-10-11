@@ -1,0 +1,22 @@
+# Performance thresholds checked in CI (`scripts/ci/check-budget.py`). They are the numbers of the
+# "Performance budget" table in docs/specs/product-spec.md; raise one only with an ADR.
+#
+# A benchmark fails the pull request when its p95 per-iteration time exceeds `p95_ms` by more than
+# `tolerance` (the noise margin of shared CI runners).
+
+tolerance = 0.20
+
+# Keystroke to ranked results for 2000 apps (the matcher and the ranker).
+[[benchmark]]
+match = "rank_2000_apps/*"
+p95_ms = 16
+
+# Loading the stored application list at start (the index is read before the hotkey is registered).
+[[benchmark]]
+match = "index_load_2000/*"
+p95_ms = 20
+
+# Loading the stored launches at start.
+[[benchmark]]
+match = "frecency_load_10k/*"
+p95_ms = 50

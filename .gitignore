@@ -1,4 +1,13 @@
 node_modules/
 target/
-dist/
+# The Tauri build embeds apps/ui/dist, so the directory has to exist on a fresh checkout.
+apps/ui/dist/*
+!apps/ui/dist/.gitkeep
+src-tauri/gen/
 .DS_Store
+Thumbs.db
+*.log
+coverage/
+.idea/
+/.vscode/*
+!/.vscode/extensions.json

@@ -1,0 +1,5 @@
+# Text files are LF in the working tree on every platform (Biome and Prettier check for it).
+* text=auto eol=lf
+*.png binary
+*.ico binary
+*.icns binary
