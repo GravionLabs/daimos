@@ -184,6 +184,8 @@ export function App(props: { host?: Host }) {
       setRoot(merged);
       setRootFirst(scrollInto(first, selectedIndex(merged), merged.items.length));
     });
+    // Every listener is set up: the shell replays a show or a text it sent before this point.
+    void host().ready();
     onCleanup(() => {
       unsubscribeTheme();
       unsubscribeSettings();

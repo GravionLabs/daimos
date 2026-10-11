@@ -9,6 +9,7 @@ use tauri::{AppHandle, Manager, Wry};
 use tauri_specta::Event;
 
 use crate::bindings::{QuerySet, WindowShown};
+use crate::ui_ready::UiReadiness;
 
 /// Blur events right after a show are the window system settling the focus, not the user
 /// clicking away.
@@ -50,6 +51,7 @@ pub fn install(app: &AppHandle<Wry>) {
     let host: Host = Arc::new(TauriWindowHost::new(app.clone(), "main"));
     app.manage(host);
     app.manage(ShowTimer::default());
+    app.manage(UiReadiness::default());
 }
 
 pub fn show(app: &AppHandle<Wry>) {
@@ -58,15 +60,20 @@ pub fn show(app: &AppHandle<Wry>) {
     host.show();
     // The CI jobs on sway and macOS read these lines (scripts/ci/*-check.sh).
     log::info!("window visibility: shown");
-    // The UI clears its query on this event; it answers with `first_paint`.
-    let _ = WindowShown.emit(app);
+    // The UI clears its query on this event; it answers with `first_paint`. Before the web view
+    // listens the event is kept (`ui_ready` replays it).
+    if app.state::<UiReadiness>().shown() {
+        let _ = WindowShown.emit(app);
+    }
 }
 
 /// Shows the window and puts `query` into the search field.
 pub fn show_with_query(app: &AppHandle<Wry>, query: &str) {
     show(app);
     // After `show`: the UI clears its query on the show event and then takes this one.
-    let _ = QuerySet(query.to_owned()).emit(app);
+    if app.state::<UiReadiness>().query(query) {
+        let _ = QuerySet(query.to_owned()).emit(app);
+    }
 }
 
 pub fn hide(app: &AppHandle<Wry>) {

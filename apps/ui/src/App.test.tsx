@@ -12,6 +12,19 @@ describe("App", () => {
     mounts.count = 0;
   });
 
+  it("tells the shell it listens only after every listener is set up", () => {
+    const { host } = fakeHost();
+    const subscriptions = (
+      ["onShown", "onQuery", "onResults", "onTheme", "onOpenSettings"] as const
+    ).map((name) => vi.spyOn(host, name));
+    render(() => <App host={host} />);
+    expect(host.ready).toHaveBeenCalledOnce();
+    const ready = vi.mocked(host.ready).mock.invocationCallOrder[0] ?? 0;
+    for (const spy of subscriptions) {
+      expect(spy.mock.invocationCallOrder[0] ?? Number.POSITIVE_INFINITY).toBeLessThan(ready);
+    }
+  });
+
   it("clears the query on show without recreating the component tree", async () => {
     const { host, show } = fakeHost();
     render(() => <App host={host} />);

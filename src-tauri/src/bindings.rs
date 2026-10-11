@@ -150,6 +150,20 @@ pub fn set_theme(app: AppHandle, setting: ThemeSetting) -> Result<ThemeInfo, Str
     Ok(info)
 }
 
+/// The UI listens to events now: what was sent before (a `daimos show \"text\"` right after the
+/// start) is replayed.
+#[tauri::command]
+#[specta::specta]
+pub fn ui_ready(app: AppHandle, ui: State<'_, crate::ui_ready::UiReadiness>) {
+    let (shown, query) = ui.ready();
+    if shown {
+        let _ = WindowShown.emit(&app);
+    }
+    if let Some(query) = query {
+        let _ = QuerySet(query).emit(&app);
+    }
+}
+
 /// The UI reports how many result rows it shows; the window grows or shrinks to fit.
 #[tauri::command]
 #[specta::specta]
@@ -427,6 +441,7 @@ pub fn builder() -> Builder<tauri::Wry> {
             capabilities,
             set_hotkey,
             hide_window,
+            ui_ready,
             resize_window,
             first_paint,
             query,
