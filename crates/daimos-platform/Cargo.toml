@@ -25,6 +25,8 @@ workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 ashpd = { version = "0.13.13", default-features = false, features = ["tokio", "global_shortcuts"] }
+freedesktop-desktop-entry = "0.8.3"
+freedesktop-icons = "0.4.0"
 futures-util = "0.3.34"
 gtk-layer-shell = { version = "0.8.2", features = ["v0_6"], optional = true }
 tokio = { version = "1.53.2", features = ["rt", "sync", "time", "macros"] }
