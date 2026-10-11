@@ -326,7 +326,14 @@ export function App(props: { host?: Host }) {
       <Show when={!settingsOpen()}>
         <Show
           when={stack().length > 0}
-          fallback={<SearchField query={query()} onQuery={setQuery} onEscape={onEscape} />}
+          fallback={
+            <SearchField
+              query={query()}
+              onQuery={setQuery}
+              onEscape={onEscape}
+              onSettings={() => setSettingsOpen(true)}
+            />
+          }
         >
           <header class="crumb">
             <button type="button" class="back" aria-label="Back" onClick={back}>

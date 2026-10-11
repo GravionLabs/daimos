@@ -9,6 +9,13 @@ async function openSettings(host: ReturnType<typeof fakeHost>) {
 }
 
 describe("opening the settings", () => {
+  it("opens from the button in the search row", async () => {
+    const fake = fakeHost();
+    render(() => <App host={fake.host} />);
+    fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    expect(await screen.findByRole("region", { name: "Settings" })).toBeInTheDocument();
+  });
+
   it("opens from the tray event and replaces the palette", async () => {
     const fake = fakeHost();
     const page = await openSettings(fake);
