@@ -5,7 +5,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) and GitVersion (Gi
 
 ---
 
-## [0.1.0] — 2026-10-11
+## [0.1.0-beta.28] — 2026-10-11
 
 ### Bug Fixes
 - Repeat the wake-up connect when the IPC server stops (#43)
@@ -15,6 +15,7 @@ Versioning follows [Semantic Versioning](https://semver.org/) and GitVersion (Gi
 
 ### Documentation
 - Product spec, architecture, extension model and ADRs for Daimos
+- Update CHANGELOG.md for v0.1.0
 
 
 ### Features
