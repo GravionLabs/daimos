@@ -8,7 +8,7 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
-daimos-core = { version = "0.1.0", path = "../daimos-core" }
+daimos-core = { path = "../daimos-core" }
 log = "0.4.34"
 serde = { version = "1.0.229", features = ["derive"] }
 tauri = "2.12.2"

@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.6.7", features = ["derive"] }
-daimos-core = { version = "0.1.0", path = "../daimos-core" }
+daimos-core = { path = "../daimos-core" }
 
 [lints]
 workspace = true
