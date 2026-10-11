@@ -8,7 +8,7 @@ use futures::stream::{self, BoxStream};
 use crate::apps::AppEntry;
 use crate::frecency::Frecency;
 use crate::index::IndexService;
-use crate::model::{Action, ActionKind, Icon, Item, ItemBatch};
+use crate::model::{Action, ActionKind, Detail, Icon, Item, ItemBatch};
 use crate::provider::{Provider, QueryContext};
 use crate::ranker::{Candidate, Ranker};
 
@@ -47,7 +47,22 @@ pub fn item_for(app: &AppEntry) -> Item {
         kind: ActionKind::Run,
         payload: Some(format!("{}#{}", app.id, a.id)),
     }))
+    .chain(std::iter::once(Action {
+        id: "copy".into(),
+        title: "Copy Command".into(),
+        shortcut: None,
+        kind: ActionKind::Copy,
+        payload: Some(app.exec.clone()),
+    }))
     .collect();
+    let mut entries = vec![("Command".to_owned(), app.exec.clone())];
+    if let Some(generic) = &app.generic_name {
+        entries.insert(0, ("Kind".to_owned(), generic.clone()));
+    }
+    if !app.keywords.is_empty() {
+        entries.push(("Keywords".to_owned(), app.keywords.join(", ")));
+    }
+    item.detail = Some(Detail::Metadata { entries });
     item
 }
 
@@ -175,5 +190,17 @@ mod tests {
         assert_eq!(item.actions[0].kind, ActionKind::Open);
         assert_eq!(item.actions[0].payload.as_deref(), Some("linux:fx.desktop"));
         assert_eq!(item.actions[1].payload.as_deref(), Some("linux:fx.desktop#private"));
+        // Copying the command is the last action; the detail lists what Tab shows.
+        let copy = item.actions.last().unwrap();
+        assert_eq!((copy.kind, copy.payload.as_deref()), (ActionKind::Copy, Some("Firefox")));
+        assert_eq!(
+            item.detail,
+            Some(Detail::Metadata {
+                entries: vec![
+                    ("Kind".into(), "Web Browser".into()),
+                    ("Command".into(), "Firefox".into())
+                ]
+            })
+        );
     }
 }

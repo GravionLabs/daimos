@@ -25,6 +25,10 @@ export const commands = {
 	 *  so the application that was launched can take the focus.
 	 */
 	runAction: (itemId: string, actionId: string) => typedError<null, string>(__TAURI_INVOKE("run_action", { itemId, actionId })),
+	/**  The view a `push` or `form` action of a result of `provider` points to. */
+	loadView: (provider: string, viewId: string) => typedError<View, string>(__TAURI_INVOKE("load_view", { provider, viewId })),
+	/**  Hands the values of a submitted form to its provider. */
+	submitForm: (provider: string, viewId: string, values: { [key in string]: string }) => typedError<null, string>(__TAURI_INVOKE("submit_form", { provider, viewId, values })),
 };
 
 /** Events */
@@ -117,7 +121,7 @@ export type ResultBatch = {
 };
 
 /**  What a provider answers with. Views are data; the webview renders them. */
-export type View = { type: "list"; items: Item[] } | { type: "detail"; detail: Detail } | { type: "form"; fields: FormField[] } | { type: "push"; view_id: string };
+export type View = { type: "list"; items: Item[] } | { type: "detail"; detail: Detail } | { type: "form"; fields: FormField[] } | { type: "push"; viewId: string };
 
 /**  Emitted every time the window is shown, so the UI can clear the query without being recreated. */
 export type WindowShown = null;

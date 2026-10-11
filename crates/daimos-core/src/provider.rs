@@ -3,7 +3,9 @@
 use futures::stream::BoxStream;
 use tokio_util::sync::CancellationToken;
 
-use crate::model::ItemBatch;
+use std::collections::HashMap;
+
+use crate::model::{ItemBatch, View};
 
 /// What a provider receives for one query.
 #[derive(Debug, Clone)]
@@ -35,4 +37,14 @@ pub trait Provider: Send + Sync {
     }
 
     fn query(&self, ctx: QueryContext) -> BoxStream<'static, ItemBatch>;
+
+    /// The view a `push` or `form` action points to. Providers without views keep the default.
+    fn view(&self, _view_id: &str) -> Option<View> {
+        None
+    }
+
+    /// Receives the values of a submitted `form` view.
+    fn submit(&self, _view_id: &str, _values: &HashMap<String, String>) -> Result<(), String> {
+        Err("this provider has no forms".into())
+    }
 }

@@ -1,12 +1,16 @@
-import { createEffect, createSignal, onCleanup, onMount } from "solid-js";
-import type { Item } from "./bindings";
+import { createEffect, createSignal, Match, onCleanup, onMount, Show, Switch } from "solid-js";
+import { ACTION_ROW_HEIGHT, ActionPanel } from "./ActionPanel";
+import type { Action, Detail, FormField, Item, View } from "./bindings";
+import { DetailPane } from "./DetailPane";
+import { FormView } from "./FormView";
 import { type Host, tauriHost } from "./host";
-import { ResultList } from "./ResultList";
+import { ResultList, ROW_HEIGHT } from "./ResultList";
 import {
   applyBatch,
   emptyResults,
   move,
   primaryAction,
+  providerOf,
   type Results,
   SESSION,
   scrollInto,
@@ -19,11 +23,50 @@ import { SearchField } from "./SearchField";
 /** How often the component tree was created. The window is hidden and shown, never rebuilt. */
 export const mounts = { count: 0 };
 
+/** One level of the navigation stack: a view that an action pushed. */
+type Frame =
+  | { kind: "list"; title: string; provider: string; results: Results; first: number }
+  | { kind: "detail"; title: string; detail: Detail }
+  | { kind: "form"; title: string; provider: string; viewId: string; fields: FormField[] };
+
+const TOAST_MS = 1600;
+
 export function App(props: { host?: Host }) {
   const host = () => props.host ?? tauriHost;
   const [query, setQueryText] = createSignal("");
-  const [results, setResults] = createSignal<Results>(emptyResults);
-  const [first, setFirst] = createSignal(0);
+  const [root, setRoot] = createSignal<Results>(emptyResults);
+  const [rootFirst, setRootFirst] = createSignal(0);
+  const [stack, setStack] = createSignal<Frame[]>([]);
+  const [panel, setPanel] = createSignal<{ selected: number } | null>(null);
+  const [showDetail, setShowDetail] = createSignal(false);
+  const [toast, setToast] = createSignal<string | null>(null);
+  let toastTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const top = () => stack().at(-1);
+  /** The list the keyboard works on: the pushed list view, or the search results. */
+  const list = (): { results: Results; first: number } => {
+    const frame = top();
+    return frame?.kind === "list"
+      ? { results: frame.results, first: frame.first }
+      : { results: root(), first: rootFirst() };
+  };
+  const setList = (results: Results, first: number) => {
+    const frame = top();
+    if (frame?.kind === "list") {
+      setStack([...stack().slice(0, -1), { ...frame, results, first }]);
+    } else {
+      setRoot(results);
+      setRootFirst(first);
+    }
+  };
+
+  const selectedItem = () => list().results.items[selectedIndex(list().results)];
+
+  const notify = (message: string) => {
+    setToast(message);
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => setToast(null), TOAST_MS);
+  };
 
   /** Sets the text and asks the core for results; the list keeps showing the old ones until the first batch. */
   const setQuery = (text: string) => {
@@ -32,18 +75,80 @@ export function App(props: { host?: Host }) {
   };
 
   const select = (next: Results) => {
-    setResults(next);
-    setFirst(scrollInto(first(), selectedIndex(next), next.items.length));
+    const { first } = list();
+    setList(next, scrollInto(first, selectedIndex(next), next.items.length));
   };
 
-  const run = (item: Item | undefined) => {
-    const action = item && primaryAction(item);
-    if (item && action) host().runAction(item.id, action.id);
+  const closeTransient = () => {
+    setPanel(null);
+    setShowDetail(false);
+    setStack([]);
   };
+
+  const push = (frame: Frame) => {
+    setPanel(null);
+    setStack([...stack(), frame]);
+  };
+
+  const showView = (title: string, provider: string, viewId: string | null, view: View) => {
+    if (view.type === "list") {
+      const results = applyBatch(emptyResults, {
+        session: SESSION,
+        seq: 0,
+        provider,
+        items: view.items,
+        done: true,
+      });
+      push({ kind: "list", title, provider, results, first: 0 });
+    } else if (view.type === "detail") {
+      push({ kind: "detail", title, detail: view.detail });
+    } else if (view.type === "form") {
+      push({ kind: "form", title, provider, viewId: viewId ?? "", fields: view.fields });
+    } else {
+      // A view that points to another view: follow it.
+      void open(title, provider, view.viewId);
+    }
+  };
+
+  const open = async (title: string, provider: string, viewId: string) => {
+    try {
+      showView(title, provider, viewId, await host().loadView(provider, viewId));
+    } catch (error) {
+      notify(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  /** Runs one action of an item: what happens depends on its kind. */
+  const runItemAction = (item: Item, action: Action) => {
+    const provider = providerOf(list().results, item.id) ?? "";
+    setPanel(null);
+    switch (action.kind) {
+      case "copy":
+        host()
+          .copy(action.payload ?? item.title)
+          .then(() => notify("Copied"))
+          .catch(() => notify("Could not copy"));
+        break;
+      case "push":
+      case "form":
+        if (action.payload) void open(action.title, provider, action.payload);
+        break;
+      default:
+        host().runAction(item.id, action.id);
+    }
+  };
+
+  const runPrimary = (item: Item | undefined) => {
+    const action = item && primaryAction(item);
+    if (item && action) runItemAction(item, action);
+  };
+
+  const back = () => setStack(stack().slice(0, -1));
 
   onMount(() => {
     mounts.count += 1;
     const unsubscribe = host().onShown(() => {
+      closeTransient();
       setQuery("");
       // Two frames: the first applies the cleared state, the second is on screen.
       requestAnimationFrame(() => requestAnimationFrame(() => host().firstPaint()));
@@ -51,61 +156,175 @@ export function App(props: { host?: Host }) {
     const unsubscribeQuery = host().onQuery(setQuery);
     const unsubscribeResults = host().onResults((batch) => {
       if (batch.session !== SESSION) return;
-      const merged = applyBatch(results(), batch);
+      const merged = applyBatch(root(), batch);
       // A new query starts at the top; a merge scrolls only if the selection left the viewport.
-      if (batch.seq === 0) setFirst(0);
-      select(merged);
+      const first = batch.seq === 0 ? 0 : rootFirst();
+      setRoot(merged);
+      setRootFirst(scrollInto(first, selectedIndex(merged), merged.items.length));
     });
     onCleanup(() => {
       unsubscribe();
       unsubscribeQuery();
       unsubscribeResults();
+      clearTimeout(toastTimer);
     });
   });
 
-  // The window is sized for the rows the list shows.
-  createEffect(() => host().resize(Math.min(results().items.length, VIEWPORT_ROWS)));
+  const panelRows = () => {
+    const open = panel();
+    const item = selectedItem();
+    return open && item
+      ? Math.ceil((item.actions.length * ACTION_ROW_HEIGHT + 16) / ROW_HEIGHT)
+      : 0;
+  };
+
+  // The window is sized for what it shows: the result rows, a roomier detail pane, the panel, a form.
+  createEffect(() => {
+    const frame = top();
+    let rows: number;
+    if (frame?.kind === "form") rows = frame.fields.length + 2;
+    else if (frame?.kind === "detail") rows = VIEWPORT_ROWS;
+    else rows = Math.min(list().results.items.length, VIEWPORT_ROWS);
+    if (showDetail() && frame?.kind !== "form") rows = Math.max(rows, 5);
+    rows = Math.max(rows, panelRows());
+    host().resize(Math.min(rows, VIEWPORT_ROWS));
+  });
+
+  const onEscape = () => {
+    if (panel()) setPanel(null);
+    else if (stack().length > 0) back();
+    else if (showDetail()) setShowDetail(false);
+    else if (query() !== "") setQuery("");
+    else host().hide();
+  };
 
   const onKeyDown = (event: KeyboardEvent) => {
-    const current = results();
-    const index = selectedIndex(current);
+    // Pushed views have no search field, so Esc is handled here: close the panel, else go back.
+    if (event.key === "Escape" && stack().length > 0) {
+      event.preventDefault();
+      onEscape();
+      return;
+    }
+    // A form keeps its own keys; a detail view has no list.
+    const frame = top();
+    if (frame?.kind === "form" || frame?.kind === "detail") return;
+    const { results, first } = list();
+    const item = selectedItem();
+    const open = panel();
     const pick = (next: Results) => {
       event.preventDefault();
       select(next);
     };
-    if (event.key === "ArrowDown") pick(move(current, 1));
-    else if (event.key === "ArrowUp") pick(move(current, -1));
-    else if (event.key === "Home") pick(selectAt(current, 0));
-    else if (event.key === "End") pick(selectAt(current, current.items.length - 1));
+
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
+      event.preventDefault();
+      setPanel(open ? null : item ? { selected: 0 } : null);
+      return;
+    }
+    if (open && item) {
+      const last = item.actions.length - 1;
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setPanel({ selected: Math.min(last, open.selected + 1) });
+      } else if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setPanel({ selected: Math.max(0, open.selected - 1) });
+      } else if (event.key === "Enter") {
+        event.preventDefault();
+        const action = item.actions[open.selected];
+        if (action) runItemAction(item, action);
+      } else if (event.key === "Escape") {
+        event.preventDefault();
+        setPanel(null);
+      }
+      return;
+    }
+    if (event.key === "Tab") {
+      event.preventDefault();
+      setShowDetail(!showDetail());
+    } else if (event.key === "ArrowDown") pick(move(results, 1));
+    else if (event.key === "ArrowUp") pick(move(results, -1));
+    else if (event.key === "Home") pick(selectAt(results, 0));
+    else if (event.key === "End") pick(selectAt(results, results.items.length - 1));
     else if (event.key === "Enter") {
       event.preventDefault();
-      run(current.items[index]);
+      runPrimary(item);
     } else if ((event.ctrlKey || event.metaKey) && /^[1-9]$/.test(event.key)) {
       // Ctrl/Cmd+1…9 run the n-th visible result.
       event.preventDefault();
-      run(current.items[first() + Number(event.key) - 1]);
+      runPrimary(results.items[first + Number(event.key) - 1]);
     }
   };
 
+  const listView = () => (
+    <div class="split" data-detail={showDetail()}>
+      <ResultList
+        items={list().results.items}
+        selectedId={list().results.selected}
+        first={list().first}
+        iconSrc={(icon) => host().iconSrc(icon)}
+        onScroll={(first) => setList(list().results, first)}
+        onSelect={(index) => setList(selectAt(list().results, index), list().first)}
+        onRun={(index) => runPrimary(list().results.items[index])}
+      />
+      <Show when={showDetail()}>
+        <DetailPane detail={selectedItem()?.detail ?? null} />
+      </Show>
+    </div>
+  );
+
   return (
     <main class="palette" onKeyDown={onKeyDown}>
-      <SearchField
-        query={query()}
-        onQuery={setQuery}
-        onEscape={() => {
-          if (query() === "") host().hide();
-          else setQuery("");
-        }}
-      />
-      <ResultList
-        items={results().items}
-        selectedId={results().selected}
-        first={first()}
-        iconSrc={(icon) => host().iconSrc(icon)}
-        onScroll={setFirst}
-        onSelect={(index) => setResults(selectAt(results(), index))}
-        onRun={(index) => run(results().items[index])}
-      />
+      <Show
+        when={stack().length > 0}
+        fallback={<SearchField query={query()} onQuery={setQuery} onEscape={onEscape} />}
+      >
+        <header class="crumb">
+          <button type="button" class="back" aria-label="Back" onClick={back}>
+            ←
+          </button>
+          <span>{top()?.title}</span>
+        </header>
+      </Show>
+      <Switch>
+        <Match when={top()?.kind === "form" && (top() as Extract<Frame, { kind: "form" }>)}>
+          {(form) => (
+            <FormView
+              title={form().title}
+              fields={form().fields}
+              onSubmit={(values) => {
+                host()
+                  .submitForm(form().provider, form().viewId, values)
+                  .then(() => {
+                    notify("Done");
+                    back();
+                  })
+                  .catch((error) => notify(error instanceof Error ? error.message : String(error)));
+              }}
+            />
+          )}
+        </Match>
+        <Match when={top()?.kind === "detail" && (top() as Extract<Frame, { kind: "detail" }>)}>
+          {(detail) => <DetailPane detail={detail().detail} />}
+        </Match>
+        <Match when={true}>{listView()}</Match>
+      </Switch>
+      <Show when={panel() && selectedItem()}>
+        {(item) => (
+          <ActionPanel
+            actions={item().actions}
+            selected={panel()?.selected ?? 0}
+            onSelect={(index) => setPanel({ selected: index })}
+            onRun={(index) => {
+              const action = item().actions[index];
+              if (action) runItemAction(item(), action);
+            }}
+          />
+        )}
+      </Show>
+      <Show when={toast()}>
+        <output class="toast">{toast()}</output>
+      </Show>
     </main>
   );
 }
