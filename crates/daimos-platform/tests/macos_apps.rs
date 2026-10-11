@@ -119,7 +119,7 @@ fn names_identifiers_and_hidden_agents_come_from_the_bundle() {
         apps.iter().map(|a| (a.name.clone(), a.id.clone())).collect();
     let expected = [
         ("Display Name".to_owned(), "macos:dev.example.display".to_owned()),
-        ("NoName".to_owned(), format!("macos:{}", dir.path().join("NoName.app").display())),
+        ("NoName".to_owned(), "macos:dev.example.noname".to_owned()),
         ("Plain Name".to_owned(), "macos:dev.example.plain".to_owned()),
         ("Tool".to_owned(), "macos:dev.example.tool".to_owned()),
     ];
