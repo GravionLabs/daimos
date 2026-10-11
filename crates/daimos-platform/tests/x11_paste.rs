@@ -1,5 +1,5 @@
 //! The XTest paster against a second X client that has the input focus. Needs an X server
-//! (`DISPLAY`); without one the test does nothing.
+//! (`DISPLAY`) and no Wayland session; otherwise the test does nothing.
 #![cfg(target_os = "linux")]
 
 use std::time::{Duration, Instant};
@@ -15,6 +15,11 @@ use x11rb::{COPY_DEPTH_FROM_PARENT, CURRENT_TIME};
 
 #[test]
 fn ctrl_v_reaches_the_focused_window() {
+    // Never against a desktop: under a Wayland session DISPLAY is Xwayland, and the test would
+    // type into the user's windows. CI and `xvfb-run` have no Wayland display.
+    if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        return;
+    }
     let Some(_) = std::env::var_os("DISPLAY") else { return };
     let Ok((conn, screen)) = x11rb::connect(None) else { return };
     if XTestPaster.support() != PasteSupport::Full {
