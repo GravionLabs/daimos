@@ -56,7 +56,8 @@ fn the_paste_shortcut_is_sent_as_ctrl_down_v_down_v_up_ctrl_up() {
     // SAFETY: `handle` came from SetWindowsHookExW.
     unsafe { UnhookWindowsHookEx(handle) }.unwrap();
 
-    const CONTROL: u32 = 0x11;
+    // The hook reports the left Control key (VK_LCONTROL) for the generic VK_CONTROL that is sent.
+    const CONTROL: u32 = 0xA2;
     const V: u32 = 0x56;
     let seen = SEEN.lock().unwrap().clone();
     assert_eq!(
