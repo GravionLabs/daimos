@@ -200,6 +200,27 @@ fn an_absolute_icon_path_is_kept_and_a_missing_one_is_dropped() {
     assert_ne!(apps[1].icon.as_deref(), Some(Path::new("/nonexistent/icon.png")));
 }
 
+#[test]
+fn an_icon_behind_symlinks_is_reported_as_the_real_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real");
+    fs::create_dir_all(&real).unwrap();
+    fs::write(real.join("icon.png"), b"png").unwrap();
+    // A relative link, like icon themes have, and a link to a link.
+    std::os::unix::fs::symlink("icon.png", real.join("link.png")).unwrap();
+    std::os::unix::fs::symlink("real/link.png", dir.path().join("outer.png")).unwrap();
+    write(
+        dir.path(),
+        "a.desktop",
+        &format!(
+            "[Desktop Entry]\nType=Application\nName=A\nExec=x\nIcon={}\n",
+            dir.path().join("outer.png").display()
+        ),
+    );
+    let apps = source(dir.path()).scan();
+    assert_eq!(apps[0].icon, Some(fs::canonicalize(real.join("icon.png")).unwrap()));
+}
+
 fn wait_for(path: &Path) -> String {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {

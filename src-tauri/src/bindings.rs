@@ -55,6 +55,27 @@ pub fn hide_window(app: AppHandle) {
     crate::window_control::hide(&app);
 }
 
+/// Runs an action of a result (`Enter` runs `open`). The window hides after a successful start,
+/// so the application that was launched can take the focus.
+#[tauri::command]
+#[specta::specta]
+pub fn run_action(
+    app: AppHandle,
+    runner: State<'_, std::sync::Arc<daimos_core::actions::ActionRunner>>,
+    item_id: String,
+    action_id: String,
+) -> Result<(), String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
+    runner.run(&item_id, &action_id, now).map_err(|error| {
+        log::warn!("action {action_id} of {item_id} failed: {error}");
+        error.to_string()
+    })?;
+    crate::window_control::hide(&app);
+    Ok(())
+}
+
 /// The UI reports how many result rows it shows; the window grows or shrinks to fit.
 #[tauri::command]
 #[specta::specta]
@@ -222,7 +243,8 @@ pub fn builder() -> Builder<tauri::Wry> {
             hide_window,
             resize_window,
             first_paint,
-            query
+            query,
+            run_action
         ])
         .events(collect_events![
             WindowShown,
