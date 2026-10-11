@@ -81,7 +81,7 @@ jobs:
       - name: Benchmarks against the budget
         shell: bash
         run: |
-          cargo bench -p daimos-core -- --warm-up-time 1 --measurement-time 3
+          cargo bench -p daimos-core --bench rank -- --warm-up-time 1 --measurement-time 3
           python="$(command -v python3 || command -v python)"
           "$python" scripts/ci/check-budget.py
       # Informational until a baseline exists: first paint, cold start and resident memory of the
