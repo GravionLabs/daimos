@@ -320,8 +320,8 @@ mod tests {
 
     #[test]
     fn straight_alpha_is_restored() {
-        // 50 % alpha: a premultiplied 64 is a straight 128.
-        assert_eq!(unpremultiply(vec![64, 32, 0, 128]), [127, 64, 0, 128]);
+        // 50 % alpha: a premultiplied 64 is a straight 128 (rounded).
+        assert_eq!(unpremultiply(vec![64, 32, 0, 128]), [128, 64, 0, 128]);
         assert_eq!(unpremultiply(vec![10, 20, 30, 255]), [10, 20, 30, 255]);
         assert_eq!(unpremultiply(vec![0, 0, 0, 0]), [0, 0, 0, 0]);
     }
