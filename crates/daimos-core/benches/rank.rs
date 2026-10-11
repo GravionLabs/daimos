@@ -54,5 +54,18 @@ fn bench(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench);
+/// Loading the stored launches at start: 10 000 rows from SQLite into memory.
+fn bench_load(c: &mut Criterion) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("frecency.db");
+    {
+        let frecency = Frecency::open(&path).unwrap();
+        for i in 0..10_000 {
+            frecency.record(&format!("app{}", i % 2000), i64::from(i)).unwrap();
+        }
+    }
+    c.bench_function("frecency_load_10k/open", |b| b.iter(|| Frecency::open(&path).unwrap()));
+}
+
+criterion_group!(benches, bench, bench_load);
 criterion_main!(benches);
