@@ -6,7 +6,7 @@
 # The last tag is a pre-release (v0.1.0-beta.28), and GitVersion does not raise the version of a
 # tagged pre-release: neither a release branch name nor `+semver: minor` gives 0.2. next-version
 # does. Set it to the minor of the release when its branch is cut.
-next-version: 0.2.0
+next-version: 0.3.0
 mode: ContinuousDelivery
 branches:
   main:
