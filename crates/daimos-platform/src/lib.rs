@@ -1,5 +1,6 @@
 //! OS integration behind one trait per concern; one module per platform, selected with `cfg`.
 
+pub mod accent;
 pub mod apps;
 pub mod hotkey;
 #[cfg(target_os = "macos")]

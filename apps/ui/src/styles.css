@@ -1,19 +1,38 @@
 :root {
   color-scheme: light dark;
+  /* Light scheme. The dark scheme below is used when the OS asks for it and nothing is forced. */
   --bg: #ffffff;
   --fg: #1c1c1e;
-  --muted: #6e6e73;
-  --accent: #5b6cff;
-  --selected: #e8eaff;
+  --muted: #5c5c63;
+  --accent: #3f4fd8;
+  --selected: #e3e6ff;
+  --error: #b3261e;
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #1e1e20;
     --fg: #f2f2f7;
-    --muted: #98989d;
+    --muted: #a0a0a8;
+    --accent: #8c9bff;
     --selected: #2c2f4a;
+    --error: #ff7b72;
   }
+}
+
+/* The scheme the app applies (`data-theme`), whether forced in the settings or taken from the OS. */
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #1e1e20;
+  --fg: #f2f2f7;
+  --muted: #a0a0a8;
+  --accent: #8c9bff;
+  --selected: #2c2f4a;
+  --error: #ff7b72;
 }
 
 * {
@@ -257,11 +276,11 @@ kbd {
 }
 
 .form input[aria-invalid="true"] {
-  border-color: #d9534f;
+  border-color: var(--error);
 }
 
 .error {
-  color: #d9534f;
+  color: var(--error);
   font-size: 0.8125rem;
 }
 
@@ -279,4 +298,16 @@ kbd {
 
 .palette {
   position: relative;
+}
+
+/* Motion is a nicety: with the OS setting for reduced motion there are no transitions or animations. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    /* biome-ignore lint/complexity/noImportantStyles: the standard reset must beat every component rule */
+    transition: none !important;
+    /* biome-ignore lint/complexity/noImportantStyles: same reset */
+    animation: none !important;
+  }
 }

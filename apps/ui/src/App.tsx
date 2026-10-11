@@ -19,6 +19,7 @@ import {
   VIEWPORT_ROWS,
 } from "./results";
 import { SearchField } from "./SearchField";
+import { applyTheme } from "./theme";
 
 /** How often the component tree was created. The window is hidden and shown, never rebuilt. */
 export const mounts = { count: 0 };
@@ -146,9 +147,21 @@ export function App(props: { host?: Host }) {
 
   const back = () => setStack(stack().slice(0, -1));
 
+  /** Reads the theme and applies it; a failure keeps the CSS defaults (the OS scheme). */
+  const refreshTheme = () => {
+    host()
+      .theme()
+      .then((info) => applyTheme(info))
+      .catch(() => {});
+  };
+
   onMount(() => {
     mounts.count += 1;
+    refreshTheme();
+    const unsubscribeTheme = host().onTheme((info) => applyTheme(info));
     const unsubscribe = host().onShown(() => {
+      // The accent can change while the window is hidden.
+      refreshTheme();
       closeTransient();
       setQuery("");
       // Two frames: the first applies the cleared state, the second is on screen.
@@ -164,6 +177,7 @@ export function App(props: { host?: Host }) {
       setRootFirst(scrollInto(first, selectedIndex(merged), merged.items.length));
     });
     onCleanup(() => {
+      unsubscribeTheme();
       unsubscribe();
       unsubscribeQuery();
       unsubscribeResults();

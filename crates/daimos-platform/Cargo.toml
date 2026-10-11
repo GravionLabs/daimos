@@ -38,10 +38,13 @@ windows = { version = "0.61", features = [
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
     "Win32_System_Registry",
+    "Win32_System_WinRT",
     "Win32_System_Threading",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",
+    "UI",
+    "UI_ViewManagement",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -51,6 +54,8 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "block2",
+    "NSColor",
+    "NSColorSpace",
     "NSGraphicsContext",
     "NSImage",
     "NSImageRep",

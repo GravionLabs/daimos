@@ -29,6 +29,10 @@ export const commands = {
 	loadView: (provider: string, viewId: string) => typedError<View, string>(__TAURI_INVOKE("load_view", { provider, viewId })),
 	/**  Hands the values of a submitted form to its provider. */
 	submitForm: (provider: string, viewId: string, values: { [key in string]: string }) => typedError<null, string>(__TAURI_INVOKE("submit_form", { provider, viewId, values })),
+	/**  The theme the UI applies at start and on every show. */
+	theme: () => __TAURI_INVOKE<ThemeInfo>("theme"),
+	/**  Forces a color scheme (or `system`) and tells the UI. */
+	setTheme: (setting: ThemeSetting) => typedError<ThemeInfo, string>(__TAURI_INVOKE("set_theme", { setting })),
 };
 
 /** Events */
@@ -37,6 +41,7 @@ export const events = {
 	openSettings: makeEvent<OpenSettings>("open-settings"),
 	queryResults: makeEvent<QueryResults>("query-results"),
 	querySet: makeEvent<QuerySet>("query-set"),
+	themeChanged: makeEvent<ThemeChanged>("theme-changed"),
 	windowShown: makeEvent<WindowShown>("window-shown"),
 };
 
@@ -121,6 +126,22 @@ export type ResultBatch = {
 	/**  The provider's weight; the UI lists providers with a higher weight first. */
 	weight: number | null,
 };
+
+/**  Emitted when the OS theme or the theme setting changes. */
+export type ThemeChanged = ThemeInfo;
+
+/**  The color scheme and accent the UI should use right now. */
+export type ThemeInfo = {
+	/**  What the user chose in the settings: `system`, `light` or `dark`. */
+	setting: ThemeSetting,
+	/**  The scheme of the OS, `light` or `dark`; the UI uses it while the setting is `system`. */
+	system: string,
+	/**  The accent color of the OS as `#rrggbb`; `None` where the OS has none (Linux). */
+	accent: string | null,
+};
+
+/**  Which color scheme the palette uses: the one of the OS, or one forced in the settings. */
+export type ThemeSetting = "system" | "light" | "dark";
 
 /**  What a provider answers with. Views are data; the webview renders them. */
 export type View = { type: "list"; items: Item[] } | { type: "detail"; detail: Detail } | { type: "form"; fields: FormField[] } | { type: "push"; viewId: string };

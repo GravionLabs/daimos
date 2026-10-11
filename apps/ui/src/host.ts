@@ -1,5 +1,12 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { commands, events, type Icon, type ResultBatch, type View } from "./bindings";
+import {
+  commands,
+  events,
+  type Icon,
+  type ResultBatch,
+  type ThemeInfo,
+  type View,
+} from "./bindings";
 
 /** What the palette needs from the Rust shell; tests replace it. */
 export interface Host {
@@ -21,6 +28,10 @@ export interface Host {
   loadView(provider: string, viewId: string): Promise<View>;
   /** Hands the values of a submitted form to its provider. */
   submitForm(provider: string, viewId: string, values: Record<string, string>): Promise<void>;
+  /** The color scheme and accent to use now. */
+  theme(): Promise<ThemeInfo>;
+  /** Calls `callback` when the OS theme or the theme setting changes; returns an unsubscribe function. */
+  onTheme(callback: (theme: ThemeInfo) => void): () => void;
   /** The URL the web view can load an icon from, or null when there is none (placeholder). */
   iconSrc(icon: Icon): string | null;
   hide(): void;
@@ -45,6 +56,11 @@ export const tauriHost: Host = {
   },
   runAction: (itemId, actionId) => void commands.runAction(itemId, actionId),
   copy: (text) => navigator.clipboard.writeText(text),
+  theme: () => commands.theme(),
+  onTheme(callback) {
+    const unlisten = events.themeChanged.listen((event) => callback(event.payload));
+    return () => void unlisten.then((fn) => fn());
+  },
   async loadView(provider, viewId) {
     const result = await commands.loadView(provider, viewId);
     if (result.status === "error") throw new Error(result.error);

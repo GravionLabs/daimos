@@ -9,16 +9,27 @@ pub fn default_hotkey() -> String {
     if cfg!(target_os = "macos") { "Option+Space" } else { "Alt+Space" }.to_owned()
 }
 
+/// Which color scheme the palette uses: the one of the OS, or one forced in the settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemeSetting {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     /// The accelerator that toggles the window, for example `Alt+Space`.
     pub hotkey: String,
+    pub theme: ThemeSetting,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { hotkey: default_hotkey() }
+        Self { hotkey: default_hotkey(), theme: ThemeSetting::default() }
     }
 }
 
@@ -75,7 +86,7 @@ mod tests {
     fn saved_hotkey_is_read_back() {
         let dir = tempfile::tempdir().unwrap();
         let store = SettingsStore::new(dir.path().join("nested"));
-        store.save(&Settings { hotkey: "Ctrl+Shift+Space".into() }).unwrap();
+        store.save(&Settings { hotkey: "Ctrl+Shift+Space".into(), ..Settings::default() }).unwrap();
         assert_eq!(store.load().unwrap().hotkey, "Ctrl+Shift+Space");
     }
 
@@ -84,6 +95,28 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("settings.json"), "{}").unwrap();
         assert_eq!(SettingsStore::new(dir.path()).load().unwrap().hotkey, default_hotkey());
+    }
+
+    #[test]
+    fn the_theme_defaults_to_the_system_and_is_stored_in_lowercase() {
+        assert_eq!(Settings::default().theme, ThemeSetting::System);
+        let dir = tempfile::tempdir().unwrap();
+        let store = SettingsStore::new(dir.path());
+        store.save(&Settings { theme: ThemeSetting::Dark, ..Settings::default() }).unwrap();
+        assert!(
+            std::fs::read_to_string(dir.path().join("settings.json"))
+                .unwrap()
+                .contains(r#""theme": "dark""#)
+        );
+        assert_eq!(store.load().unwrap().theme, ThemeSetting::Dark);
+    }
+
+    #[test]
+    fn a_settings_file_without_a_theme_keeps_the_other_values() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("settings.json"), r#"{"hotkey":"Ctrl+Space"}"#).unwrap();
+        let loaded = SettingsStore::new(dir.path()).load().unwrap();
+        assert_eq!((loaded.hotkey.as_str(), loaded.theme), ("Ctrl+Space", ThemeSetting::System));
     }
 
     #[test]
