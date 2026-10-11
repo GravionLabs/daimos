@@ -5,6 +5,17 @@ Versioning follows [Semantic Versioning](https://semver.org/) and GitVersion (Gi
 
 ---
 
+## [0.3.0] — 2026-10-11
+
+### Bug Fixes
+- Record the clipboard through Xwayland where there is no wlr-data-control (#134)
+
+
+### Features
+- Paster trait, pasters for X11, Wayland, Windows and macOS, and the paste command (#128) (#129) (#130) (#61)
+- Clipboard History command, keyword search and entry actions (#132) (#62)
+
+
 ## [0.2.0-beta.25] — 2026-10-11
 
 ### Bug Fixes
