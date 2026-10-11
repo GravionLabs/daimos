@@ -1,3 +1,5 @@
+<p align="center"><img src="src-tauri/icons/icon.png" alt="Daimos" width="128" height="128"></p>
+
 # Daimos
 
 > Working name. See the [product spec](docs/specs/product-spec.md) for open decisions.
@@ -5,7 +7,7 @@
 A cross-platform command palette for the desktop: one hotkey, one window, the same extensions on
 Linux (X11 and Wayland), Windows, and macOS. Built with Tauri 2, a Rust core, and SolidJS.
 
-Status: M0 Foundation in progress (scaffold, hotkey, resident window).
+Status: version 0.1 (beta). It launches apps from a hotkey, calculates and converts units and currencies, and has a settings page; extensions, clipboard history and file search come next (see the milestones in the product spec).
 
 ## Build and run
 
