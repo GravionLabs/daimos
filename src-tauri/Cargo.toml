@@ -33,6 +33,9 @@ tauri-plugin-single-instance = "2.5.3"
 default = ["layer-shell"]
 # Overlay window on Wayland compositors with wlr-layer-shell; needs libgtk-layer-shell-dev.
 layer-shell = ["daimos-platform/layer-shell"]
+# Serve the built UI from the binary instead of the dev server: what a release build and the
+# measurements in CI (scripts/ci/measure-app.py) use.
+custom-protocol = ["tauri/custom-protocol"]
 
 [lints]
 workspace = true
