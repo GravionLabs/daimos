@@ -70,5 +70,5 @@ fn ctrl_v_reaches_the_focused_window() {
         }
     }
     assert_eq!(presses.len(), 2, "Control and V arrive as key presses");
-    assert!(KeyButMask::from(presses[1].state).contains(KeyButMask::CONTROL));
+    assert!(presses[1].state.contains(KeyButMask::CONTROL));
 }
