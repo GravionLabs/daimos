@@ -352,12 +352,11 @@ pub async fn set_hotkey(
     tauri::async_runtime::spawn_blocking(move || service.bind(&wanted)).await.map_err(|e| {
         HotkeyFailure { kind: "backend".into(), binding: None, message: e.to_string() }
     })??;
-    status.set(HotkeyStatus {
-        state: "active".into(),
-        session: status.get().session,
-        binding: Some(binding.clone()),
-        message: None,
-    });
+    status.set(crate::capabilities::bound_status(
+        &status.get().session,
+        &Binding::new(binding.clone()),
+        hotkey.backend().reported_trigger(),
+    ));
     let store = SettingsStore::new(app.path().app_config_dir().map_err(|e| HotkeyFailure {
         kind: "backend".into(),
         binding: None,
