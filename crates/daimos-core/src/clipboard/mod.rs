@@ -6,13 +6,15 @@
 
 mod capture;
 mod history;
+mod provider;
 
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 pub use capture::{Capture, CaptureError};
-pub use history::{ClipboardHistory, HistoryError, Limits};
+pub use history::{ClipboardHistory, Entry, HistoryError, Limits};
+pub use provider::{ClipboardProvider, HISTORY_VIEW, KEYWORD};
 
 /// What was copied.
 #[derive(Debug, Clone, PartialEq, Eq)]

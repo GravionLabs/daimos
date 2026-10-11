@@ -55,7 +55,7 @@ function BlockView(props: { block: Block }) {
   );
 }
 
-/** The detail of an item: Markdown text or key/value metadata. */
+/** The detail of an item: Markdown text, key/value metadata or a picture. */
 export function DetailPane(props: { detail: Detail | null }) {
   return (
     <aside class="detail" aria-label="Detail">
@@ -70,6 +70,18 @@ export function DetailPane(props: { detail: Detail | null }) {
             <For each={parseMarkdown(markdown().text)}>
               {(block) => <BlockView block={block} />}
             </For>
+          )}
+        </Match>
+        <Match
+          when={
+            props.detail?.type === "image" && (props.detail as Extract<Detail, { type: "image" }>)
+          }
+        >
+          {(image) => (
+            <figure class="detail-image">
+              <img src={image().data_url} alt={image().caption} />
+              <figcaption>{image().caption}</figcaption>
+            </figure>
           )}
         </Match>
         <Match

@@ -61,10 +61,22 @@ pub fn hide_window(app: AppHandle) {
 #[specta::specta]
 pub fn run_action(
     app: AppHandle,
+    engine: State<'_, std::sync::Arc<QueryEngine>>,
     runner: State<'_, std::sync::Arc<daimos_core::actions::ActionRunner>>,
     item_id: String,
     action_id: String,
 ) -> Result<(), String> {
+    // Items of a provider (the clipboard history) are run by it; the rest are applications.
+    if let Some(result) = engine.run_action(&item_id, &action_id) {
+        let effect = result.map_err(|error| {
+            log::warn!("action {action_id} of {item_id} failed: {error}");
+            error
+        })?;
+        if effect == daimos_core::ActionEffect::Hide {
+            crate::window_control::hide(&app);
+        }
+        return Ok(());
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
