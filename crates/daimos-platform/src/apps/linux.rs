@@ -14,6 +14,8 @@ use std::process::{Command, Stdio};
 use daimos_core::apps::{AppAction, AppEntry, AppSource};
 use freedesktop_desktop_entry::DesktopEntry;
 
+/// The id of the action that shows the `.desktop` file in the file manager; its `exec` is the path.
+const REVEAL: &str = "reveal";
 const FALLBACK_ICON: &str = "application-x-executable";
 const ICON_SIZE: u16 = 64;
 
@@ -108,7 +110,7 @@ impl LinuxAppSource {
             .keywords(&self.locales)
             .map(|k| k.iter().map(|k| k.trim().to_owned()).filter(|k| !k.is_empty()).collect())
             .unwrap_or_default();
-        let actions = entry
+        let mut actions: Vec<AppAction> = entry
             .actions()
             .into_iter()
             .flatten()
@@ -123,6 +125,11 @@ impl LinuxAppSource {
                 })
             })
             .collect();
+        actions.push(AppAction {
+            id: REVEAL.into(),
+            name: "Show in file manager".into(),
+            exec: path.display().to_string(),
+        });
         Some(AppEntry {
             id: format!("linux:{id}"),
             name,
@@ -226,6 +233,11 @@ impl AppSource for LinuxAppSource {
     }
 
     fn launch(&self, app: &AppEntry, action: Option<&str>) -> io::Result<()> {
+        if action == Some(REVEAL)
+            && let Some(reveal) = app.actions.iter().find(|a| a.id == REVEAL)
+        {
+            return reveal_in_file_manager(Path::new(&reveal.exec));
+        }
         let (exec, terminal) = match action {
             Some(id) => {
                 let action = app.actions.iter().find(|a| a.id == id).ok_or_else(|| {
@@ -291,6 +303,51 @@ fn with_exec_flag(mut argv: Vec<String>) -> Vec<String> {
         argv.push("-e".into());
     }
     argv
+}
+
+/// Selects `path` in the default file manager over `org.freedesktop.FileManager1`, and opens the
+/// containing folder when no file manager answers on the session bus.
+fn reveal_in_file_manager(path: &Path) -> io::Result<()> {
+    let shown = Command::new("dbus-send")
+        .args(show_items_args(path))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if shown {
+        return Ok(());
+    }
+    let folder = path.parent().unwrap_or(path);
+    spawn_detached(&["xdg-open".to_owned(), folder.display().to_string()])
+}
+
+/// The `dbus-send` arguments of `FileManager1.ShowItems` for `path`.
+pub fn show_items_args(path: &Path) -> Vec<String> {
+    vec![
+        "--session".into(),
+        "--print-reply".into(),
+        "--dest=org.freedesktop.FileManager1".into(),
+        "/org/freedesktop/FileManager1".into(),
+        "org.freedesktop.FileManager1.ShowItems".into(),
+        format!("array:string:{}", file_uri(path)),
+        "string:".into(),
+    ]
+}
+
+/// A `file://` URI with everything but unreserved characters and `/` percent-encoded.
+pub fn file_uri(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut uri = String::from("file://");
+    for &byte in path.as_os_str().as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                uri.push(byte as char);
+            }
+            _ => uri.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    uri
 }
 
 fn spawn_detached(argv: &[String]) -> io::Result<()> {
@@ -386,6 +443,25 @@ pub fn split_exec(exec: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn paths_become_percent_encoded_file_uris() {
+        assert_eq!(
+            file_uri(Path::new("/usr/share/applications/a.desktop")),
+            "file:///usr/share/applications/a.desktop"
+        );
+        assert_eq!(
+            file_uri(Path::new("/home/me/My Apps/ä,b.desktop")),
+            "file:///home/me/My%20Apps/%C3%A4%2Cb.desktop"
+        );
+    }
+
+    #[test]
+    fn show_items_targets_the_file_manager_service() {
+        let args = show_items_args(Path::new("/a b.desktop"));
+        assert!(args.contains(&"--dest=org.freedesktop.FileManager1".to_owned()));
+        assert!(args.contains(&"array:string:file:///a%20b.desktop".to_owned()));
+    }
 
     #[test]
     fn field_codes_are_stripped_and_percent_is_unescaped() {
