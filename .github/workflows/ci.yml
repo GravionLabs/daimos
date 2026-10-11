@@ -76,6 +76,35 @@ jobs:
         run: |
           cargo build -p daimos-app -p daimos-cli
           scripts/ci/macos-focus-check.sh
+      # The budget of docs/specs/product-spec.md: criterion benchmarks against budget.toml (a pull
+      # request fails when one exceeds its threshold by more than 20 %).
+      - name: Benchmarks against the budget
+        shell: bash
+        run: |
+          cargo bench -p daimos-core --bench rank -- --warm-up-time 1 --measurement-time 3
+          python="$(command -v python3 || command -v python)"
+          "$python" scripts/ci/check-budget.py
+      # Informational until a baseline exists: first paint, cold start and resident memory of the
+      # real app, printed in the job summary.
+      - name: Measure the app (X11)
+        if: matrix.session == 'x11'
+        run: |
+          cargo build -p daimos-app -p daimos-cli --features custom-protocol
+          export WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1
+          MEASURE_LABEL="Ubuntu X11" xvfb-run --auto-servernum python3 scripts/ci/measure-app.py
+      - name: Measure the app (headless sway)
+        if: matrix.session == 'wayland'
+        run: |
+          cargo build -p daimos-app -p daimos-cli --features custom-protocol
+          export WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1 GDK_BACKEND=wayland
+          MEASURE_LABEL="Ubuntu Wayland (sway)" scripts/ci/run-in-sway.sh python3 scripts/ci/measure-app.py
+      - name: Measure the app
+        if: matrix.session == 'native'
+        shell: bash
+        run: |
+          cargo build -p daimos-app -p daimos-cli --features custom-protocol
+          python="$(command -v python3 || command -v python)"
+          MEASURE_LABEL="${{ matrix.name }}" "$python" scripts/ci/measure-app.py
       # `pnpm test` also checks that apps/ui/src/bindings.ts is current (bindings:check).
       # rpm bundling hangs on the runner and AppImage needs extra tools: the debug bundle on Linux is
       # the deb; the full set of packages is the v1.0 packaging work.
