@@ -192,6 +192,8 @@ pub struct Capabilities {
     /// `layer_shell` or `toplevel`.
     pub window_mode: String,
     pub hotkey: HotkeyStatus,
+    /// Each capability with its level and the reason.
+    pub items: Vec<crate::capabilities::Capability>,
 }
 
 #[tauri::command]
@@ -201,15 +203,124 @@ pub fn capabilities(
     mode: State<'_, daimos_platform::platform::WindowMode>,
 ) -> Capabilities {
     let hotkey = status.get();
+    let window_mode = match *mode {
+        daimos_platform::platform::WindowMode::LayerShell => "layer_shell",
+        daimos_platform::platform::WindowMode::Toplevel => "toplevel",
+    };
     Capabilities {
         session: hotkey.session.clone(),
-        window_mode: match *mode {
-            daimos_platform::platform::WindowMode::LayerShell => "layer_shell",
-            daimos_platform::platform::WindowMode::Toplevel => "toplevel",
-        }
-        .into(),
+        window_mode: window_mode.into(),
+        items: crate::capabilities::capabilities(&hotkey.session, window_mode, &hotkey),
         hotkey,
     }
+}
+
+/// One provider as the settings page shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ProviderView {
+    pub id: String,
+    pub enabled: bool,
+    /// The weight in use: the user's, or the provider's own.
+    pub weight: f32,
+    pub default_weight: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct AliasEntry {
+    pub alias: String,
+    pub target: String,
+}
+
+/// The settings the page edits.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct SettingsView {
+    pub hotkey: String,
+    pub theme: ThemeSetting,
+    pub providers: Vec<ProviderView>,
+    pub aliases: Vec<AliasEntry>,
+}
+
+fn settings_view(app: &AppHandle, settings: &daimos_core::settings::Settings) -> SettingsView {
+    let providers = app
+        .try_state::<std::sync::Arc<QueryEngine>>()
+        .map(|engine| engine.providers())
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, default_weight)| {
+            let own = settings.providers.get(&id).copied().unwrap_or_default();
+            ProviderView {
+                enabled: own.enabled,
+                weight: own.weight.unwrap_or(default_weight),
+                default_weight,
+                id,
+            }
+        })
+        .collect();
+    SettingsView {
+        hotkey: settings.hotkey.clone(),
+        theme: settings.theme,
+        providers,
+        aliases: settings
+            .aliases
+            .iter()
+            .map(|(alias, target)| AliasEntry { alias: alias.clone(), target: target.clone() })
+            .collect(),
+    }
+}
+
+/// Stores `settings` and makes the query engine use them from the next query on.
+fn apply_settings(
+    app: &AppHandle,
+    settings: &daimos_core::settings::Settings,
+) -> Result<SettingsView, String> {
+    config_store(app)?.save(settings).map_err(|e| e.to_string())?;
+    if let Some(engine) = app.try_state::<std::sync::Arc<QueryEngine>>() {
+        engine.set_config(daimos_core::query::EngineConfig::from(settings));
+    }
+    Ok(settings_view(app, settings))
+}
+
+/// The settings page loads everything it edits with this.
+#[tauri::command]
+#[specta::specta]
+pub fn settings(app: AppHandle) -> Result<SettingsView, String> {
+    let settings = config_store(&app)?.load().map_err(|e| e.to_string())?;
+    Ok(settings_view(&app, &settings))
+}
+
+/// Switches a provider on or off and sets its weight (`None` is the provider's own); applies live.
+#[tauri::command]
+#[specta::specta]
+pub fn set_provider(
+    app: AppHandle,
+    id: String,
+    enabled: bool,
+    weight: Option<f32>,
+) -> Result<SettingsView, String> {
+    let mut settings = config_store(&app)?.load().map_err(|e| e.to_string())?;
+    let weight = weight.filter(|w| w.is_finite());
+    if enabled && weight.is_none() {
+        settings.providers.remove(&id);
+    } else {
+        settings.providers.insert(id, daimos_core::settings::ProviderSetting { enabled, weight });
+    }
+    apply_settings(&app, &settings)
+}
+
+/// Replaces the aliases; applies live. Empty names and duplicates (ignoring case) are dropped.
+#[tauri::command]
+#[specta::specta]
+pub fn set_aliases(app: AppHandle, aliases: Vec<AliasEntry>) -> Result<SettingsView, String> {
+    let mut settings = config_store(&app)?.load().map_err(|e| e.to_string())?;
+    settings.aliases.clear();
+    for entry in aliases {
+        let alias = entry.alias.trim().to_lowercase();
+        let target = entry.target.trim().to_owned();
+        if !alias.is_empty() && !target.is_empty() {
+            settings.aliases.entry(alias).or_insert(target);
+        }
+    }
+    apply_settings(&app, &settings)
 }
 
 /// Binds a new hotkey and stores it in the settings. A refused binding changes nothing.
@@ -313,6 +424,7 @@ pub fn builder() -> Builder<tauri::Wry> {
         .commands(collect_commands![
             app_info,
             hotkey_status,
+            capabilities,
             set_hotkey,
             hide_window,
             resize_window,
@@ -322,7 +434,10 @@ pub fn builder() -> Builder<tauri::Wry> {
             load_view,
             submit_form,
             theme,
-            set_theme
+            set_theme,
+            settings,
+            set_provider,
+            set_aliases
         ])
         .events(collect_events![
             WindowShown,

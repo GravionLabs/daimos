@@ -7,6 +7,7 @@ import * as __TAURI_EVENT from "@tauri-apps/api/event";
 export const commands = {
 	appInfo: () => __TAURI_INVOKE<AppInfo>("app_info"),
 	hotkeyStatus: () => __TAURI_INVOKE<HotkeyStatus>("hotkey_status"),
+	capabilities: () => __TAURI_INVOKE<Capabilities>("capabilities"),
 	/**  Binds a new hotkey and stores it in the settings. A refused binding changes nothing. */
 	setHotkey: (binding: string) => typedError<null, HotkeyFailure>(__TAURI_INVOKE("set_hotkey", { binding })),
 	/**  The UI hides the window (`Esc` with an empty query). */
@@ -33,6 +34,12 @@ export const commands = {
 	theme: () => __TAURI_INVOKE<ThemeInfo>("theme"),
 	/**  Forces a color scheme (or `system`) and tells the UI. */
 	setTheme: (setting: ThemeSetting) => typedError<ThemeInfo, string>(__TAURI_INVOKE("set_theme", { setting })),
+	/**  The settings page loads everything it edits with this. */
+	settings: () => typedError<SettingsView, string>(__TAURI_INVOKE("settings")),
+	/**  Switches a provider on or off and sets its weight (`None` is the provider's own); applies live. */
+	setProvider: (id: string, enabled: boolean, weight: number | null) => typedError<SettingsView, string>(__TAURI_INVOKE("set_provider", { id, enabled, weight })),
+	/**  Replaces the aliases; applies live. Empty names and duplicates (ignoring case) are dropped. */
+	setAliases: (aliases: AliasEntry[]) => typedError<SettingsView, string>(__TAURI_INVOKE("set_aliases", { aliases })),
 };
 
 /** Events */
@@ -57,10 +64,34 @@ export type Action = {
 
 export type ActionKind = "open" | "copy" | "paste" | "run" | "push" | "form";
 
+export type AliasEntry = {
+	alias: string,
+	target: string,
+};
+
 /**  Version of the running application, shown by the UI and logged by the shell. */
 export type AppInfo = {
 	name: string,
 	version: string,
+};
+
+/**  What this system can do, so the settings page can say what is missing and why. */
+export type Capabilities = {
+	session: string,
+	/**  `layer_shell` or `toplevel`. */
+	window_mode: string,
+	hotkey: HotkeyStatus,
+	/**  Each capability with its level and the reason. */
+	items: Capability[],
+};
+
+export type Capability = {
+	id: string,
+	label: string,
+	level: Level,
+	reason: string,
+	/**  Steps the user can take, shown below the reason (a compositor configuration, for example). */
+	instructions: string | null,
 };
 
 export type Detail = { type: "markdown"; text: string } | { type: "metadata"; entries: ([string, string])[] };
@@ -107,8 +138,19 @@ export type Item = {
 	highlight?: number[],
 };
 
+export type Level = "available" | "limited" | "unavailable";
+
 /**  The tray item `Settings` was chosen; the UI opens the settings page (M1). */
 export type OpenSettings = null;
+
+/**  One provider as the settings page shows it. */
+export type ProviderView = {
+	id: string,
+	enabled: boolean,
+	/**  The weight in use: the user's, or the provider's own. */
+	weight: number | null,
+	default_weight: number | null,
+};
 
 /**  One batch of results for a query session; see `ResultBatch` for the fields. */
 export type QueryResults = ResultBatch;
@@ -125,6 +167,14 @@ export type ResultBatch = {
 	done: boolean,
 	/**  The provider's weight; the UI lists providers with a higher weight first. */
 	weight: number | null,
+};
+
+/**  The settings the page edits. */
+export type SettingsView = {
+	hotkey: string,
+	theme: ThemeSetting,
+	providers: ProviderView[],
+	aliases: AliasEntry[],
 };
 
 /**  Emitted when the OS theme or the theme setting changes. */

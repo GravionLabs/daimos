@@ -1,8 +1,8 @@
 //! The query engine: fans a query out to the providers, streams batches, cancels per session.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -38,17 +38,66 @@ struct Running {
     seq: AtomicU32,
 }
 
+/// What the user chose in the settings; it applies to the next query, so changes are live.
+#[derive(Debug, Clone, Default)]
+pub struct EngineConfig {
+    /// Providers that are switched off, by id.
+    pub disabled: HashSet<String>,
+    /// Replaces a provider's own weight (the order among providers), by id.
+    pub weights: HashMap<String, f32>,
+    /// Lowercase alias to the text searched instead when the whole query is the alias.
+    pub aliases: HashMap<String, String>,
+}
+
+impl From<&crate::settings::Settings> for EngineConfig {
+    fn from(settings: &crate::settings::Settings) -> Self {
+        let mut config = Self::default();
+        for (id, provider) in &settings.providers {
+            if !provider.enabled {
+                config.disabled.insert(id.clone());
+            }
+            if let Some(weight) = provider.weight {
+                config.weights.insert(id.clone(), weight);
+            }
+        }
+        config.aliases = settings
+            .aliases
+            .iter()
+            .filter(|(alias, target)| !alias.trim().is_empty() && !target.trim().is_empty())
+            .map(|(alias, target)| (alias.trim().to_lowercase(), target.trim().to_owned()))
+            .collect();
+        config
+    }
+}
+
 pub struct QueryEngine {
     providers: Vec<Arc<dyn Provider>>,
     sink: Sink,
     handle: Handle,
     sessions: Mutex<HashMap<u32, Arc<Running>>>,
+    config: RwLock<EngineConfig>,
 }
 
 impl QueryEngine {
     /// Providers run on the runtime behind `handle`; batches go to `sink`.
     pub fn new(providers: Vec<Arc<dyn Provider>>, sink: Sink, handle: Handle) -> Self {
-        Self { providers, sink, handle, sessions: Mutex::new(HashMap::new()) }
+        Self {
+            providers,
+            sink,
+            handle,
+            sessions: Mutex::new(HashMap::new()),
+            config: RwLock::new(EngineConfig::default()),
+        }
+    }
+
+    /// Replaces the user's choices; the next query uses them.
+    pub fn set_config(&self, config: EngineConfig) {
+        *self.config.write().unwrap_or_else(|e| e.into_inner()) = config;
+    }
+
+    /// The ids and own weights of all providers, for the settings page.
+    pub fn providers(&self) -> Vec<(String, f32)> {
+        self.providers.iter().map(|p| (p.id().to_owned(), p.weight())).collect()
     }
 
     /// Cancels the previous query of `session` and starts a new one.
@@ -64,8 +113,13 @@ impl QueryEngine {
             previous.cancel.cancel();
         }
 
+        let config = self.config.read().unwrap_or_else(|e| e.into_inner()).clone();
+        // An alias is the whole query: `ff` searches for what it stands for.
+        let text = config.aliases.get(&text.trim().to_lowercase()).map_or(text, String::as_str);
         let (targets, text, keyword_routed) = self.route(text);
-        for provider in targets {
+        for provider in targets.into_iter().filter(|p| !config.disabled.contains(p.id())) {
+            let weight =
+                config.weights.get(provider.id()).copied().unwrap_or_else(|| provider.weight());
             let ctx = QueryContext {
                 text: text.clone(),
                 keyword_routed,
@@ -73,6 +127,7 @@ impl QueryEngine {
             };
             self.handle.spawn(run_provider(
                 provider,
+                weight,
                 ctx,
                 session,
                 Arc::clone(&running),
@@ -131,13 +186,13 @@ impl QueryEngine {
 
 async fn run_provider(
     provider: Arc<dyn Provider>,
+    weight: f32,
     ctx: QueryContext,
     session: u32,
     running: Arc<Running>,
     sink: Sink,
 ) {
     let id = provider.id().to_owned();
-    let weight = provider.weight();
     let cancel = ctx.cancel.clone();
     let deadline = Instant::now() + provider.budget();
     let mut stream = provider.query(ctx);
@@ -347,6 +402,110 @@ mod tests {
         assert_eq!(until_done(&mut rx, 2).await.iter().filter(|b| b.done).count(), 2);
         engine.query(1, "zz thing");
         assert_eq!(until_done(&mut rx, 2).await.iter().filter(|b| b.done).count(), 2);
+    }
+
+    /// Everything the provider got as text, so a test can see what was searched.
+    struct Echo(&'static str);
+
+    impl Provider for Echo {
+        fn id(&self) -> &str {
+            self.0
+        }
+        fn query(&self, ctx: QueryContext) -> BoxStream<'static, ItemBatch> {
+            stream::once(async move { ItemBatch::from(vec![Item::new("e", ctx.text)]) }).boxed()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_disabled_provider_is_skipped_and_a_weight_overrides_the_own_one() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink: Sink = Arc::new(move |b| {
+            let _ = tx.send(b);
+        });
+        let engine = QueryEngine::new(
+            vec![Arc::new(Echo("one")), Arc::new(Echo("two")), Arc::new(Echo("three"))],
+            sink,
+            Handle::current(),
+        );
+        engine.set_config(EngineConfig {
+            disabled: HashSet::from(["two".to_owned()]),
+            weights: HashMap::from([("three".to_owned(), 7.0)]),
+            aliases: HashMap::new(),
+        });
+        engine.query(1, "x");
+        let batches = until_done(&mut rx, 2).await;
+        let mut providers: Vec<_> =
+            batches.iter().map(|b| (b.provider.as_str(), b.weight)).collect();
+        providers.sort_by(|a, b| a.0.cmp(b.0));
+        providers.dedup();
+        assert_eq!(providers, [("one", 1.0), ("three", 7.0)]);
+        assert!(tokio::time::timeout(Duration::from_millis(100), rx.recv()).await.is_err());
+
+        // Changes apply to the next query.
+        engine.set_config(EngineConfig::default());
+        engine.query(1, "y");
+        assert_eq!(until_done(&mut rx, 3).await.iter().filter(|b| b.done).count(), 3);
+    }
+
+    #[tokio::test]
+    async fn an_alias_replaces_the_whole_query_only() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink: Sink = Arc::new(move |b| {
+            let _ = tx.send(b);
+        });
+        let engine = QueryEngine::new(vec![Arc::new(Echo("echo"))], sink, Handle::current());
+        engine.set_config(EngineConfig {
+            aliases: HashMap::from([("ff".to_owned(), "Firefox".to_owned())]),
+            ..EngineConfig::default()
+        });
+        let searched = |batches: Vec<ResultBatch>| {
+            batches.into_iter().find_map(|b| b.items.first().map(|i| i.title.clone()))
+        };
+        engine.query(1, " FF ");
+        assert_eq!(searched(until_done(&mut rx, 1).await).as_deref(), Some("Firefox"));
+        engine.query(1, "ff x");
+        assert_eq!(searched(until_done(&mut rx, 1).await).as_deref(), Some("ff x"));
+        engine.query(1, "f");
+        assert_eq!(searched(until_done(&mut rx, 1).await).as_deref(), Some("f"));
+    }
+
+    #[test]
+    fn settings_become_an_engine_config() {
+        use crate::settings::{ProviderSetting, Settings};
+        let settings = Settings {
+            providers: [
+                ("calc".to_owned(), ProviderSetting { enabled: false, weight: Some(2.0) }),
+                ("apps".to_owned(), ProviderSetting { enabled: true, weight: Some(5.0) }),
+                ("other".to_owned(), ProviderSetting::default()),
+            ]
+            .into(),
+            aliases: [
+                (" FF ".to_owned(), " Firefox ".to_owned()),
+                (String::new(), "x".to_owned()),
+                ("empty".to_owned(), "  ".to_owned()),
+            ]
+            .into(),
+            ..Settings::default()
+        };
+        let config = EngineConfig::from(&settings);
+        assert_eq!(config.disabled, HashSet::from(["calc".to_owned()]));
+        assert_eq!(
+            config.weights,
+            HashMap::from([("calc".to_owned(), 2.0), ("apps".to_owned(), 5.0)])
+        );
+        assert_eq!(config.aliases, HashMap::from([("ff".to_owned(), "Firefox".to_owned())]));
+    }
+
+    #[test]
+    fn the_engine_lists_its_providers_with_their_weights() {
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let sink: Sink = Arc::new(|_| {});
+        let engine = QueryEngine::new(
+            vec![Arc::new(Echo("a")), Arc::new(WithViews)],
+            sink,
+            rt.handle().clone(),
+        );
+        assert_eq!(engine.providers(), [("a".to_owned(), 1.0), ("views".to_owned(), 1.0)]);
     }
 
     /// A provider with one list view and a form that accepts a value of `name` only.

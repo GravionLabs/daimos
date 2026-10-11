@@ -19,6 +19,7 @@ import {
   VIEWPORT_ROWS,
 } from "./results";
 import { SearchField } from "./SearchField";
+import { SettingsView } from "./SettingsView";
 import { applyTheme } from "./theme";
 
 /** How often the component tree was created. The window is hidden and shown, never rebuilt. */
@@ -32,6 +33,9 @@ type Frame =
 
 const TOAST_MS = 1600;
 
+/** The payload of the action that opens the settings page (see `OPEN_SETTINGS` in the core). */
+const OPEN_SETTINGS = "daimos:settings";
+
 export function App(props: { host?: Host }) {
   const host = () => props.host ?? tauriHost;
   const [query, setQueryText] = createSignal("");
@@ -40,6 +44,7 @@ export function App(props: { host?: Host }) {
   const [stack, setStack] = createSignal<Frame[]>([]);
   const [panel, setPanel] = createSignal<{ selected: number } | null>(null);
   const [showDetail, setShowDetail] = createSignal(false);
+  const [settingsOpen, setSettingsOpen] = createSignal(false);
   const [toast, setToast] = createSignal<string | null>(null);
   let toastTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -81,6 +86,7 @@ export function App(props: { host?: Host }) {
   };
 
   const closeTransient = () => {
+    setSettingsOpen(false);
     setPanel(null);
     setShowDetail(false);
     setStack([]);
@@ -133,7 +139,8 @@ export function App(props: { host?: Host }) {
         break;
       case "push":
       case "form":
-        if (action.payload) void open(action.title, provider, action.payload);
+        if (action.payload === OPEN_SETTINGS) setSettingsOpen(true);
+        else if (action.payload) void open(action.title, provider, action.payload);
         break;
       default:
         host().runAction(item.id, action.id);
@@ -159,6 +166,7 @@ export function App(props: { host?: Host }) {
     mounts.count += 1;
     refreshTheme();
     const unsubscribeTheme = host().onTheme((info) => applyTheme(info));
+    const unsubscribeSettings = host().onOpenSettings(() => setSettingsOpen(true));
     const unsubscribe = host().onShown(() => {
       // The accent can change while the window is hidden.
       refreshTheme();
@@ -178,6 +186,7 @@ export function App(props: { host?: Host }) {
     });
     onCleanup(() => {
       unsubscribeTheme();
+      unsubscribeSettings();
       unsubscribe();
       unsubscribeQuery();
       unsubscribeResults();
@@ -197,6 +206,10 @@ export function App(props: { host?: Host }) {
   createEffect(() => {
     const frame = top();
     let rows: number;
+    if (settingsOpen()) {
+      host().resize(VIEWPORT_ROWS);
+      return;
+    }
     if (frame?.kind === "form") rows = frame.fields.length + 2;
     else if (frame?.kind === "detail") rows = VIEWPORT_ROWS;
     else rows = Math.min(list().results.items.length, VIEWPORT_ROWS);
@@ -206,7 +219,8 @@ export function App(props: { host?: Host }) {
   });
 
   const onEscape = () => {
-    if (panel()) setPanel(null);
+    if (settingsOpen()) setSettingsOpen(false);
+    else if (panel()) setPanel(null);
     else if (stack().length > 0) back();
     else if (showDetail()) setShowDetail(false);
     else if (query() !== "") setQuery("");
@@ -214,6 +228,20 @@ export function App(props: { host?: Host }) {
   };
 
   const onKeyDown = (event: KeyboardEvent) => {
+    // Ctrl/Cmd+, opens the settings from anywhere in the palette (and closes them again).
+    if ((event.ctrlKey || event.metaKey) && event.key === ",") {
+      event.preventDefault();
+      setSettingsOpen(!settingsOpen());
+      return;
+    }
+    // The settings page has its own keys; Esc closes it (the search field is gone then).
+    if (settingsOpen()) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setSettingsOpen(false);
+      }
+      return;
+    }
     // Pushed views have no search field, so Esc is handled here: close the panel, else go back.
     if (event.key === "Escape" && stack().length > 0) {
       event.preventDefault();
@@ -290,40 +318,47 @@ export function App(props: { host?: Host }) {
 
   return (
     <main class="palette" onKeyDown={onKeyDown}>
-      <Show
-        when={stack().length > 0}
-        fallback={<SearchField query={query()} onQuery={setQuery} onEscape={onEscape} />}
-      >
-        <header class="crumb">
-          <button type="button" class="back" aria-label="Back" onClick={back}>
-            ←
-          </button>
-          <span>{top()?.title}</span>
-        </header>
+      <Show when={settingsOpen()}>
+        <SettingsView host={host()} onClose={() => setSettingsOpen(false)} />
       </Show>
-      <Switch>
-        <Match when={top()?.kind === "form" && (top() as Extract<Frame, { kind: "form" }>)}>
-          {(form) => (
-            <FormView
-              title={form().title}
-              fields={form().fields}
-              onSubmit={(values) => {
-                host()
-                  .submitForm(form().provider, form().viewId, values)
-                  .then(() => {
-                    notify("Done");
-                    back();
-                  })
-                  .catch((error) => notify(error instanceof Error ? error.message : String(error)));
-              }}
-            />
-          )}
-        </Match>
-        <Match when={top()?.kind === "detail" && (top() as Extract<Frame, { kind: "detail" }>)}>
-          {(detail) => <DetailPane detail={detail().detail} />}
-        </Match>
-        <Match when={true}>{listView()}</Match>
-      </Switch>
+      <Show when={!settingsOpen()}>
+        <Show
+          when={stack().length > 0}
+          fallback={<SearchField query={query()} onQuery={setQuery} onEscape={onEscape} />}
+        >
+          <header class="crumb">
+            <button type="button" class="back" aria-label="Back" onClick={back}>
+              ←
+            </button>
+            <span>{top()?.title}</span>
+          </header>
+        </Show>
+        <Switch>
+          <Match when={top()?.kind === "form" && (top() as Extract<Frame, { kind: "form" }>)}>
+            {(form) => (
+              <FormView
+                title={form().title}
+                fields={form().fields}
+                onSubmit={(values) => {
+                  host()
+                    .submitForm(form().provider, form().viewId, values)
+                    .then(() => {
+                      notify("Done");
+                      back();
+                    })
+                    .catch((error) =>
+                      notify(error instanceof Error ? error.message : String(error)),
+                    );
+                }}
+              />
+            )}
+          </Match>
+          <Match when={top()?.kind === "detail" && (top() as Extract<Frame, { kind: "detail" }>)}>
+            {(detail) => <DetailPane detail={detail().detail} />}
+          </Match>
+          <Match when={true}>{listView()}</Match>
+        </Switch>
+      </Show>
       <Show when={panel() && selectedItem()}>
         {(item) => (
           <ActionPanel
