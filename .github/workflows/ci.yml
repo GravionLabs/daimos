@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `labeled`: adding the full-matrix label starts the run again with all platforms.
+    types: [opened, synchronize, reopened, labeled]
 
 permissions:
   contents: read
@@ -30,7 +32,7 @@ jobs:
         # macOS and Windows runners cost 10x and 2x a Linux minute: a pull request into a release
         # branch runs the two Linux jobs only. The full matrix runs for pull requests into main
         # (the release PR) and for pushes to main.
-        include: ${{ fromJSON((github.event_name == 'push' || github.base_ref == 'main') && '[{"name":"Ubuntu (X11)","os":"ubuntu-latest","session":"x11"},{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"},{"name":"Windows","os":"windows-latest","session":"native"},{"name":"macOS","os":"macos-latest","session":"native"}]' || '[{"name":"Ubuntu (X11)","os":"ubuntu-latest","session":"x11"},{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"}]') }}
+        include: ${{ fromJSON((github.event_name == 'push' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-matrix')) && '[{"name":"Ubuntu (X11)","os":"ubuntu-latest","session":"x11"},{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"},{"name":"Windows","os":"windows-latest","session":"native"},{"name":"macOS","os":"macos-latest","session":"native"}]' || '[{"name":"Ubuntu (X11)","os":"ubuntu-latest","session":"x11"},{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"}]') }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install Linux packages
