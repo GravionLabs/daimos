@@ -37,8 +37,10 @@ for scheme in light dark; do
   log="$work/$scheme.log"
   "$app" >"$log" 2>&1 &
   app_pid=$!
-  for _ in $(seq 1 100); do grep -q "listening on" "$log" && break; sleep 0.2; done
+  # Start-up can take half a minute on a runner without a session bus.
+  for _ in $(seq 1 450); do grep -q "listening on" "$log" && break; sleep 0.2; done
   grep -q "listening on" "$log" || { cat "$log" >&2; echo "the app did not start" >&2; exit 1; }
+  echo "--- start-up log ($scheme)"; cat "$log"
   # The web view needs a moment to load: events sent before that are lost.
   sleep 3
   # The first scan runs in the background; wait until the fixture apps are indexed.
