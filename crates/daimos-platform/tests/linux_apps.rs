@@ -87,11 +87,13 @@ fn desktop_actions_become_actions() {
     let app = &source(dir.path()).scan()[0];
     let actions: Vec<_> =
         app.actions.iter().map(|a| (a.id.as_str(), a.name.as_str(), a.exec.as_str())).collect();
+    let desktop_file = dir.path().join("firefox.desktop").display().to_string();
     assert_eq!(
         actions,
         [
             ("new-window", "Open a New Window", "firefox --new-window"),
             ("private", "Open a New Private Window", "firefox --private-window"),
+            ("reveal", "Show in file manager", desktop_file.as_str()),
         ]
     );
 }

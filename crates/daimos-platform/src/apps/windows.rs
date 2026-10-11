@@ -21,13 +21,15 @@ use windows::Win32::System::Com::{
 use windows::Win32::UI::Shell::{
     ApplicationActivationManager, BHID_EnumItems, FOLDERID_AppsFolder,
     IApplicationActivationManager, IEnumShellItems, IShellItem, IShellItemImageFactory,
-    KF_FLAG_DEFAULT, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, SHGetKnownFolderItem,
+    KF_FLAG_DEFAULT, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, SHGetKnownFolderItem, SIGDN_FILESYSPATH,
     SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_BIGGERSIZEOK, SIIGBF_ICONONLY,
     ShellExecuteExW,
 };
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{HSTRING, PCWSTR};
 
+/// The id of the action that selects the shortcut in Explorer; its `exec` is the file path.
+const REVEAL: &str = "reveal";
 const ICON_SIZE: i32 = 64;
 const AO_NONE: windows::Win32::UI::Shell::ACTIVATEOPTIONS =
     windows::Win32::UI::Shell::ACTIVATEOPTIONS(0);
@@ -78,6 +80,11 @@ impl AppSource for WindowsAppSource {
             .strip_prefix("windows:")
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a Windows app id"))?
             .to_owned();
+        if action == Some(REVEAL)
+            && let Some(reveal) = app.actions.iter().find(|a| a.id == REVEAL)
+        {
+            return reveal_in_explorer(&reveal.exec);
+        }
         let runas = match action {
             None => false,
             Some("runas") if app.actions.iter().any(|a| a.id == "runas") => true,
@@ -139,11 +146,22 @@ fn enumerate(icon_dir: &Path) -> Vec<AppEntry> {
                 actions: if packaged {
                     Vec::new()
                 } else {
-                    vec![AppAction {
+                    let mut actions = vec![AppAction {
                         id: "runas".into(),
                         name: "Run as administrator".into(),
                         exec: apps_folder_path(&parsing_name),
-                    }]
+                    }];
+                    // Only items that are a file (a Start Menu shortcut) can be shown in Explorer.
+                    if let Some(path) =
+                        display_name(item, SIGDN_FILESYSPATH).filter(|p| !p.is_empty())
+                    {
+                        actions.push(AppAction {
+                            id: REVEAL.into(),
+                            name: "Show in Explorer".into(),
+                            exec: path,
+                        });
+                    }
+                    actions
                 },
             })
         })
@@ -289,6 +307,17 @@ pub fn fnv1a(bytes: &[u8]) -> u64 {
     })
 }
 
+fn reveal_in_explorer(path: &str) -> io::Result<()> {
+    use std::os::windows::process::CommandExt;
+    // `raw_arg`: Explorer wants `/select,"C:\a b"`, not a quoted `"/select,C:\a b"`.
+    std::process::Command::new("explorer.exe").raw_arg(select_argument(path)).spawn().map(drop)
+}
+
+/// The Explorer argument that opens the folder of `path` with the file selected.
+pub fn select_argument(path: &str) -> String {
+    format!("/select,\"{path}\"")
+}
+
 fn launch_item(parsing_name: &str, runas: bool) -> windows::core::Result<()> {
     let target = apps_folder_path(parsing_name);
     if !runas && is_packaged(parsing_name) {
@@ -330,6 +359,11 @@ fn shell_execute(target: &str, runas: bool) -> windows::core::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explorer_selects_the_quoted_path() {
+        assert_eq!(select_argument(r"C:\Users\me\a b.lnk"), r#"/select,"C:\Users\me\a b.lnk""#);
+    }
 
     #[test]
     fn packaged_apps_have_a_bang_in_their_app_user_model_id() {

@@ -65,6 +65,19 @@ fn classic_apps_offer_run_as_administrator_and_packaged_apps_do_not() {
 }
 
 #[test]
+fn only_classic_apps_with_a_file_can_be_shown_in_explorer() {
+    let (_icons, apps) = scan();
+    for app in &apps {
+        let reveal = app.actions.iter().find(|a| a.id == "reveal");
+        if app.id.contains('!') {
+            assert!(reveal.is_none(), "{} ({})", app.name, app.id);
+        } else if let Some(reveal) = reveal {
+            assert!(std::path::Path::new(&reveal.exec).exists(), "{}: {}", app.name, reveal.exec);
+        }
+    }
+}
+
+#[test]
 fn an_unknown_action_is_refused() {
     let (_icons, apps) = scan();
     let error =
