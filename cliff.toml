@@ -22,12 +22,17 @@ body = """
 {{ commit.message | upper_first }}
 {% endfor %}
 {% endif -%}
+{% set_global seen = [] -%}
 {% for group, commits in commits | group_by(attribute="group") %}
 ### {{ group | striptags | trim | upper_first }}
 {% for commit in commits %}\
+{% set key = commit.message | split(pat=" (#") | first -%}
+{% if key not in seen -%}
+{% set_global seen = seen | concat(with=key) -%}
 - {% if commit.breaking %}⚠️ **Breaking**: {% endif -%}
 {% if commit.scope %}**{{ commit.scope }}**: {% endif -%}
 {{ commit.message | upper_first }}
+{% endif -%}
 {% endfor %}
 {% endfor %}\n
 """
