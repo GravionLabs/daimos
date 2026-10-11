@@ -6,8 +6,12 @@ use daimos_core::clipboard::ClipboardBackend;
 
 use crate::session::Session;
 
+#[cfg(target_os = "macos")]
+pub mod macos;
 #[cfg(target_os = "linux")]
 pub mod wayland;
+#[cfg(windows)]
+pub mod windows;
 #[cfg(target_os = "linux")]
 pub mod x11;
 
@@ -16,6 +20,10 @@ pub fn backend(session: Session) -> Arc<dyn ClipboardBackend> {
     match session {
         #[cfg(target_os = "linux")]
         Session::X11 => Arc::new(x11::X11Clipboard),
+        #[cfg(windows)]
+        Session::Windows => Arc::new(windows::WindowsClipboard),
+        #[cfg(target_os = "macos")]
+        Session::MacOs => Arc::new(macos::MacClipboard),
         #[cfg(target_os = "linux")]
         Session::Wayland => Arc::new(wayland::WaylandClipboard),
         _ => Arc::new(Unsupported("no clipboard backend for this session")),
