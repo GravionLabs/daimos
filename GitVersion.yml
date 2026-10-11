@@ -1,13 +1,12 @@
-# The version comes from the git history (GitVersion), and from next-version while the last tag is a pre-release.
-# Until the first stable release a merge to main is <next version>-beta.<commits since the last tag>, and the GitHub release
-# is marked as a pre-release. `+semver: minor` or `+semver: major` in a commit message bumps that part.
+# The version comes from the git history (GitVersion): a merge to main is a release.
+# From 0.3 on the versions are stable. Without a label ContinuousDeployment gives plain
+# <major>.<minor>.<patch>, and the GitHub release is not marked as a pre-release.
 #
-# To release a stable version: delete the `label` line (a release/1.0 branch gives 1.0.0).
-# The last tag is a pre-release (v0.1.0-beta.28), and GitVersion does not raise the version of a
-# tagged pre-release: neither a release branch name nor `+semver: minor` gives 0.2. next-version
-# does. Set it to the minor of the release when its branch is cut.
+# Releases are numbered from the last stable tag: a merge is the next patch, `+semver: minor` or
+# `+semver: major` in a commit message bumps that part.
+#
+# next-version is needed for the first stable release only: the last tag (v0.2.0-beta.25) is a
+# pre-release, and GitVersion does not raise the version of a tagged pre-release. Delete the line
+# after v0.3.0 exists.
 next-version: 0.3.0
-mode: ContinuousDelivery
-branches:
-  main:
-    label: beta
+mode: ContinuousDeployment

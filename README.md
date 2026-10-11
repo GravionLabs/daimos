@@ -7,7 +7,7 @@
 A cross-platform command palette for the desktop: one hotkey, one window, the same extensions on
 Linux (X11 and Wayland), Windows, and macOS. Built with Tauri 2, a Rust core, and SolidJS.
 
-Status: version 0.1 (beta). It launches apps from a hotkey, calculates and converts units and currencies, and has a settings page; extensions, clipboard history and file search come next (see the milestones in the product spec).
+Status: version 0.3. It launches apps from a hotkey, calculates and converts units and currencies, keeps an optional clipboard history you can search and paste from, and has a settings page; extensions and file search come next (see the milestones in the product spec).
 
 ## Build and run
 

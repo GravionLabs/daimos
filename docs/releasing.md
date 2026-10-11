@@ -12,15 +12,15 @@ A release is the merge of a release branch into `main`. Everything after the mer
    pull request `release: <x.y>` into `main` is opened. It runs the full matrix (Ubuntu with headless
    sway, Windows, macOS) and `cargo deny`. The X11 job is not part of it; add the `x11` label to a
    pull request to run it.
-3. **Merge it with a merge commit** (never squash). The push to `main` starts `release.yml`. The
-   version of a new minor release comes from `next-version` in `GitVersion.yml`: set it to
-   `<x.y>.0` in the first pull request into the release branch. While the last tag is a
-   pre-release, neither the branch name nor `+semver: minor` raises the version (0.2 came out as
-   `0.1.0-beta.48` and `0.1.0-beta.51` before this was set).
+3. **Merge it with a merge commit** (never squash). The push to `main` starts `release.yml`. Stable
+   versions are numbered from the last stable tag: the next merge is a patch, a commit message with
+   `+semver: minor` (`+semver: major`) bumps that part, so a minor release carries it in one commit.
+   While the last tag is a pre-release (before 0.3.0) GitVersion ignores it; `next-version` in
+   `GitVersion.yml` fixed the number of 0.2 and 0.3 and is deleted after `v0.3.0`.
 4. **`release.yml`** determines the version with GitVersion (`GitVersion.yml`), builds the CLI
    binaries (Linux x86_64 and arm64, macOS arm64, Windows x86_64) and the installers (`deb`, `nsis`,
-   `dmg`), and publishes the GitHub release `v<version>` with the notes of git-cliff. Until the first
-   stable version the version is `0.1.0-beta.<n>` and the release is marked as a pre-release. The
+   `dmg`), and publishes the GitHub release `v<version>` with the notes of git-cliff. From 0.3 on the
+   version is stable (`0.3.0`); the earlier ones were `-beta.<n>` pre-releases. The
    release branch is deleted after the merge.
 
 To try the workflow without releasing, run it by hand (`gh workflow run release.yml`) or change the
