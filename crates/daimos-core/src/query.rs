@@ -193,6 +193,7 @@ async fn run_provider(
     sink: Sink,
 ) {
     let id = provider.id().to_owned();
+    let weight = provider.weight();
     let cancel = ctx.cancel.clone();
     let deadline = Instant::now() + provider.budget();
     let mut stream = provider.query(ctx);
