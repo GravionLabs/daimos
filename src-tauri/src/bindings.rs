@@ -215,18 +215,54 @@ pub struct Capabilities {
 pub fn capabilities(
     status: State<'_, StatusCell>,
     mode: State<'_, daimos_platform::platform::WindowMode>,
+    paster: State<'_, std::sync::Arc<dyn daimos_core::paste::Paster>>,
 ) -> Capabilities {
     let hotkey = status.get();
     let window_mode = match *mode {
         daimos_platform::platform::WindowMode::LayerShell => "layer_shell",
         daimos_platform::platform::WindowMode::Toplevel => "toplevel",
     };
-    Capabilities {
-        session: hotkey.session.clone(),
-        window_mode: window_mode.into(),
-        items: crate::capabilities::capabilities(&hotkey.session, window_mode, &hotkey),
-        hotkey,
+    let mut items = crate::capabilities::capabilities(&hotkey.session, window_mode, &hotkey);
+    items.push(crate::capabilities::paste_capability(&paster.support()));
+    Capabilities { session: hotkey.session.clone(), window_mode: window_mode.into(), items, hotkey }
+}
+
+/// What a `paste` request did.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct PasteResult {
+    /// The paste shortcut was sent to the previous window.
+    pub pasted: bool,
+    /// Why the text was only copied.
+    pub reason: Option<String>,
+}
+
+/// Pastes what is on the clipboard into the window the user came from: hides the window, waits
+/// for that window to take the focus back, sends the paste shortcut. Where that is not possible
+/// the window stays open, so the UI can say why the text was only copied.
+#[tauri::command]
+#[specta::specta]
+pub async fn paste(
+    app: AppHandle,
+    paster: State<'_, std::sync::Arc<dyn daimos_core::paste::Paster>>,
+) -> Result<PasteResult, String> {
+    use daimos_core::paste::{PasteOutcome, PasteSupport};
+    if let PasteSupport::Limited(reason) | PasteSupport::Unsupported(reason) = paster.support() {
+        return Ok(PasteResult { pasted: false, reason: Some(reason) });
     }
+    crate::window_control::hide(&app);
+    let paster = std::sync::Arc::clone(&paster);
+    let outcome = tauri::async_runtime::spawn_blocking(move || {
+        daimos_core::paste::paste_into_previous(&*paster, std::time::Duration::from_millis(150))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(match outcome {
+        PasteOutcome::Pasted => PasteResult { pasted: true, reason: None },
+        PasteOutcome::Copied(reason) => {
+            log::warn!("paste failed: {reason}");
+            PasteResult { pasted: false, reason: Some(reason) }
+        }
+    })
 }
 
 /// One provider as the settings page shows it.
@@ -502,7 +538,8 @@ pub fn builder() -> Builder<tauri::Wry> {
             settings,
             set_provider,
             set_aliases,
-            set_clipboard_history
+            set_clipboard_history,
+            paste
         ])
         .events(collect_events![
             WindowShown,

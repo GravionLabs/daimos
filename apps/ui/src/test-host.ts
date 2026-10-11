@@ -89,6 +89,7 @@ export function fakeHost() {
     setTheme: vi.fn(() => Promise.resolve(settingsView())),
     setProvider: vi.fn(() => Promise.resolve(settingsView())),
     setAliases: vi.fn(() => Promise.resolve(settingsView())),
+    paste: vi.fn(() => Promise.resolve({ pasted: true, reason: null })),
     setClipboardHistory: vi.fn((enabled: boolean) =>
       Promise.resolve(settingsView({ clipboard: { ...settingsView().clipboard, enabled } })),
     ),

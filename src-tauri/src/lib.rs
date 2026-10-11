@@ -119,6 +119,9 @@ fn setup_clipboard(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     );
     service.apply(&settings.clipboard);
     app.manage(Arc::new(service));
+    let paster: Arc<dyn daimos_core::paste::Paster> =
+        daimos_platform::paste::paster(Session::detect());
+    app.manage(paster);
     Ok(())
 }
 

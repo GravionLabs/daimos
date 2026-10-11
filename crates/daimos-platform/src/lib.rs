@@ -6,6 +6,7 @@ pub mod clipboard;
 pub mod hotkey;
 #[cfg(target_os = "macos")]
 pub mod macos;
+pub mod paste;
 pub mod platform;
 pub mod session;
 pub mod window;

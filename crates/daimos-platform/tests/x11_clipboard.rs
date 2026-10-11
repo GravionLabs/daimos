@@ -1,5 +1,5 @@
 //! The X11 clipboard backend against a second X client that owns the selection. Needs an X
-//! server (`DISPLAY`); without one the tests do nothing.
+//! server (`DISPLAY`) and no Wayland session; otherwise the tests do nothing.
 #![cfg(target_os = "linux")]
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,7 +28,14 @@ static KEEP_ALIVE: std::sync::OnceLock<Option<x11rb::rust_connection::RustConnec
 fn x_server() -> Option<std::sync::MutexGuard<'static, ()>> {
     let guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let alive = KEEP_ALIVE.get_or_init(|| {
-        std::env::var_os("DISPLAY").and_then(|_| x11rb::connect(None).ok()).map(|(conn, _)| conn)
+        // Never against a desktop: under a Wayland session DISPLAY is Xwayland, and the test
+        // would replace the user's clipboard.
+        std::env::var_os("WAYLAND_DISPLAY")
+            .is_none()
+            .then(|| std::env::var_os("DISPLAY"))
+            .flatten()
+            .and_then(|_| x11rb::connect(None).ok())
+            .map(|(conn, _)| conn)
     });
     alive.is_some().then_some(guard)
 }
