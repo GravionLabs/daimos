@@ -33,7 +33,7 @@ libc = "0.2.190"
 tokio = { version = "1.53.2", features = ["rt", "sync", "time", "macros"] }
 wayland-client = "0.31.15"
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
-x11rb = { version = "0.14.0", features = ["xfixes"] }
+x11rb = { version = "0.14.0", features = ["xfixes", "xtest"] }
 
 [target."cfg(windows)".dependencies]
 png = "0.18.1"
@@ -48,6 +48,7 @@ windows = { version = "0.61", features = [
     "Win32_System_Registry",
     "Win32_System_WinRT",
     "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
     "Win32_UI_WindowsAndMessaging",

@@ -141,6 +141,15 @@ impl QueryEngine {
         self.providers.iter().find(|p| p.id() == provider)?.view(view_id)
     }
 
+    /// Lets the providers run an action of an item; `None` when no provider owns the item.
+    pub fn run_action(
+        &self,
+        item_id: &str,
+        action_id: &str,
+    ) -> Option<Result<crate::provider::ActionEffect, String>> {
+        self.providers.iter().find_map(|p| p.run_action(item_id, action_id))
+    }
+
     /// Hands the values of a submitted form to its provider.
     pub fn submit(
         &self,

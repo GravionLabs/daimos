@@ -8,6 +8,7 @@ import { ResultList, ROW_HEIGHT } from "./ResultList";
 import {
   applyBatch,
   emptyResults,
+  matchesShortcut,
   move,
   primaryAction,
   providerOf,
@@ -27,7 +28,15 @@ export const mounts = { count: 0 };
 
 /** One level of the navigation stack: a view that an action pushed. */
 type Frame =
-  | { kind: "list"; title: string; provider: string; results: Results; first: number }
+  | {
+      kind: "list";
+      title: string;
+      provider: string;
+      /** The view the list came from, to reload it after an action changed it. */
+      viewId: string | null;
+      results: Results;
+      first: number;
+    }
   | { kind: "detail"; title: string; detail: Detail }
   | { kind: "form"; title: string; provider: string; viewId: string; fields: FormField[] };
 
@@ -107,7 +116,7 @@ export function App(props: { host?: Host }) {
         done: true,
         weight: 1,
       });
-      push({ kind: "list", title, provider, results, first: 0 });
+      push({ kind: "list", title, provider, viewId, results, first: 0 });
     } else if (view.type === "detail") {
       push({ kind: "detail", title, detail: view.detail });
     } else if (view.type === "form") {
@@ -126,6 +135,30 @@ export function App(props: { host?: Host }) {
     }
   };
 
+  /** Shows the list again as the core has it now: the search results, or the pushed view. */
+  const refresh = async () => {
+    const frame = top();
+    if (frame?.kind !== "list") {
+      host().query(SESSION, query());
+      return;
+    }
+    if (!frame.viewId) return;
+    const view = await host().loadView(frame.provider, frame.viewId);
+    if (view.type !== "list") return;
+    const fresh = applyBatch(emptyResults, {
+      session: SESSION,
+      seq: 0,
+      provider: frame.provider,
+      items: view.items,
+      done: true,
+      weight: 1,
+    });
+    // Keep the selection where it was, or on the last item when the list got shorter.
+    const index = Math.min(selectedIndex(frame.results), fresh.items.length - 1);
+    const next = selectAt(fresh, Math.max(0, index));
+    setList(next, scrollInto(frame.first, selectedIndex(next), next.items.length));
+  };
+
   /** Runs one action of an item: what happens depends on its kind. */
   const runItemAction = (item: Item, action: Action) => {
     const provider = providerOf(list().results, item.id) ?? "";
@@ -137,13 +170,28 @@ export function App(props: { host?: Host }) {
           .then(() => notify("Copied"))
           .catch(() => notify("Could not copy"));
         break;
+      case "paste":
+        // The web view puts the text on the clipboard (it works on every compositor), the shell
+        // sends the shortcut. Where it cannot, the text stays copied and the window says why.
+        host()
+          .copy(action.payload ?? item.title)
+          .then(() => host().paste())
+          .then((result) => {
+            if (!result.pasted) notify(`Copied. ${result.reason ?? "Paste it yourself."}`);
+          })
+          .catch(() => notify("Could not copy"));
+        break;
       case "push":
       case "form":
         if (action.payload === OPEN_SETTINGS) setSettingsOpen(true);
         else if (action.payload) void open(action.title, provider, action.payload);
         break;
       default:
-        host().runAction(item.id, action.id);
+        // Whatever the action changed (a pin, a deletion) shows in the list afterwards.
+        host()
+          .runAction(item.id, action.id)
+          .then(refresh)
+          .catch((error) => notify(error instanceof Error ? error.message : String(error)));
     }
   };
 
@@ -282,6 +330,16 @@ export function App(props: { host?: Host }) {
         event.preventDefault();
         setPanel(null);
       }
+      return;
+    }
+    // The shortcut an action names runs it (Ctrl+P pins a clipboard entry); Enter is the primary.
+    const named = item?.actions.find(
+      (action) =>
+        action.shortcut && action.shortcut !== "Enter" && matchesShortcut(event, action.shortcut),
+    );
+    if (item && named) {
+      event.preventDefault();
+      runItemAction(item, named);
       return;
     }
     if (event.key === "Tab") {

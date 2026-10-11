@@ -43,8 +43,8 @@ pub fn run() {
             if let Err(error) = tray::install(app.handle()) {
                 log::warn!("no tray icon: {error}");
             }
-            setup_query_engine(app)?;
             setup_clipboard(app)?;
+            setup_query_engine(app)?;
             setup_hotkey(app, started)?;
             start_index_in_background(app);
             ipc_server::start(app.handle());
@@ -92,6 +92,7 @@ fn setup_query_engine(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
         Arc::new(daimos_core::calc::provider::CalcProvider::new(rates)),
         Arc::new(AppsProvider::new(Arc::clone(&index), Arc::clone(&frecency))),
         Arc::new(daimos_core::commands::CommandsProvider::new()),
+        app.state::<Arc<clipboard::ClipboardService>>().provider(),
     ];
     app.manage(Arc::new(daimos_core::actions::ActionRunner::new(Arc::clone(&index), frecency)));
     let runtime = tauri::async_runtime::handle();
@@ -119,6 +120,9 @@ fn setup_clipboard(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     );
     service.apply(&settings.clipboard);
     app.manage(Arc::new(service));
+    let paster: Arc<dyn daimos_core::paste::Paster> =
+        daimos_platform::paste::paster(Session::detect());
+    app.manage(paster);
     Ok(())
 }
 
