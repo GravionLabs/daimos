@@ -1042,6 +1042,7 @@ dependencies = [
  "futures-util",
  "gtk-layer-shell",
  "log",
+ "png 0.18.1",
  "serde",
  "tauri",
  "tauri-nspanel",
