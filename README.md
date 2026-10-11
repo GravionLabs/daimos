@@ -41,6 +41,7 @@ pnpm lint && pnpm test
 
 ## Documents
 
+- [Documentation site](https://gravionlabs.github.io/daimos/) — install, Wayland setup, keyboard and command line reference (source in `docs-site/`)
 - [Product spec](docs/specs/product-spec.md) — audience, scope, milestones, budget, risks, decisions
 - [Architecture](docs/specs/architecture.md) — process model, crates, query pipeline, platform layer
 - [Extensions](docs/specs/extensions.md) — manifest, script protocol, wasm interface, conformance

@@ -1,0 +1,36 @@
+---
+title: Daimos
+description: One hotkey, one window, the same extensions on Linux, Windows, and macOS.
+template: splash
+hero:
+  tagline: A command palette for the desktop. Launch apps, calculate, and convert from one hotkey, on X11, Wayland, Windows, and macOS.
+  actions:
+    - text: Install
+      link: /daimos/guides/install/
+      icon: right-arrow
+    - text: Releases
+      link: https://github.com/GravionLabs/daimos/releases
+      variant: minimal
+      icon: external
+---
+
+import { Card, CardGrid } from "@astrojs/starlight/components";
+
+<CardGrid>
+  <Card title="Wayland first" icon="laptop">
+    The global hotkey goes through the XDG GlobalShortcuts portal; a `daimos toggle` command covers
+    compositors without it.
+  </Card>
+  <Card title="Fast and small" icon="rocket">
+    A resident window that is only hidden and shown, a measured start and memory budget.
+  </Card>
+  <Card title="Apps, math, units" icon="magnifier">
+    Fuzzy search over installed applications with icons, a calculator, unit and currency conversion.
+  </Card>
+  <Card title="Same everywhere" icon="seti:config">
+    Linux, Windows, and macOS share one core; only the platform layer differs.
+  </Card>
+</CardGrid>
+
+Daimos is in beta (version 0.1). Extensions, clipboard history and file search come next; see the
+[product spec](https://github.com/GravionLabs/daimos/blob/main/docs/specs/product-spec.md).
