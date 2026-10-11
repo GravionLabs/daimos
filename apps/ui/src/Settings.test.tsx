@@ -188,3 +188,35 @@ describe("the settings page", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("settings database is locked");
   });
 });
+
+describe("the clipboard history setting", () => {
+  it("is off by default and switches on with the checkbox", async () => {
+    const fake = fakeHost();
+    await openSettings(fake);
+    const box = await screen.findByRole("checkbox", { name: "Remember what I copy" });
+    expect(box).not.toBeChecked();
+    fireEvent.click(box);
+    await waitFor(() => expect(fake.host.setClipboardHistory).toHaveBeenCalledWith(true));
+    await waitFor(() => expect(box).toBeChecked());
+  });
+
+  it("says why it is limited, and cannot be switched on when unavailable", async () => {
+    const fake = fakeHost();
+    fake.host.settings = vi.fn(() =>
+      Promise.resolve(
+        settingsView({
+          clipboard: {
+            enabled: false,
+            max_entries: 500,
+            max_image_mb: 10,
+            level: "unavailable",
+            reason: "no X server",
+          },
+        }),
+      ),
+    );
+    await openSettings(fake);
+    expect(await screen.findByText("no X server")).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Remember what I copy" })).toBeDisabled();
+  });
+});

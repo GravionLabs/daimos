@@ -5,6 +5,7 @@ pub mod actions;
 pub mod app_provider;
 pub mod apps;
 pub mod calc;
+pub mod clipboard;
 pub mod commands;
 pub mod frecency;
 pub mod index;

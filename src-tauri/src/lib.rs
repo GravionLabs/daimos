@@ -2,6 +2,7 @@
 
 pub mod bindings;
 mod capabilities;
+mod clipboard;
 mod ipc_server;
 mod tray;
 mod ui_ready;
@@ -43,6 +44,7 @@ pub fn run() {
                 log::warn!("no tray icon: {error}");
             }
             setup_query_engine(app)?;
+            setup_clipboard(app)?;
             setup_hotkey(app, started)?;
             start_index_in_background(app);
             ipc_server::start(app.handle());
@@ -104,6 +106,22 @@ fn setup_query_engine(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+/// Opens the clipboard history and starts following the clipboard when the setting is on.
+fn setup_clipboard(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    let settings = SettingsStore::new(app.path().app_config_dir()?).load().unwrap_or_default();
+    let history = Arc::new(daimos_core::clipboard::ClipboardHistory::open(
+        &app.path().app_data_dir()?.join("clipboard.db"),
+        clipboard::limits(&settings.clipboard),
+    )?);
+    let service = clipboard::ClipboardService::new(
+        daimos_platform::clipboard::backend(Session::detect()),
+        history,
+    );
+    service.apply(&settings.clipboard);
+    app.manage(Arc::new(service));
+    Ok(())
+}
+
 /// Fetches the daily exchange rates when the cached ones are missing or old. Offline is fine: the
 /// calculator then uses what it has, and the item says how old that is.
 fn refresh_rates_in_background(rates: &Arc<daimos_core::calc::rates::RatesCache>) {
@@ -148,6 +166,9 @@ fn start_index_in_background(app: &tauri::App) {
 /// Quit from the tray or the CLI: stop the socket listener and give the hotkey back.
 fn shutdown(app: &tauri::AppHandle) {
     ipc_server::stop(app);
+    if let Some(clipboard) = app.try_state::<Arc<clipboard::ClipboardService>>() {
+        clipboard.stop();
+    }
     if let Some(index) = app.try_state::<Arc<daimos_core::index::IndexService>>() {
         index.stop();
     }

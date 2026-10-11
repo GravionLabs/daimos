@@ -11,6 +11,13 @@ export function settingsView(extra: Partial<SettingsView> = {}): SettingsView {
       { id: "calc", enabled: true, weight: 10, default_weight: 10 },
     ],
     aliases: [{ alias: "ff", target: "Firefox" }],
+    clipboard: {
+      enabled: false,
+      max_entries: 500,
+      max_image_mb: 10,
+      level: "available",
+      reason: null,
+    },
     ...extra,
   };
 }
@@ -82,6 +89,9 @@ export function fakeHost() {
     setTheme: vi.fn(() => Promise.resolve(settingsView())),
     setProvider: vi.fn(() => Promise.resolve(settingsView())),
     setAliases: vi.fn(() => Promise.resolve(settingsView())),
+    setClipboardHistory: vi.fn((enabled: boolean) =>
+      Promise.resolve(settingsView({ clipboard: { ...settingsView().clipboard, enabled } })),
+    ),
     loadView: vi.fn(() => Promise.reject(new Error("no view"))),
     submitForm: vi.fn(() => Promise.resolve()),
     query: vi.fn(),

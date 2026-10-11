@@ -2,6 +2,7 @@
 
 pub mod accent;
 pub mod apps;
+pub mod clipboard;
 pub mod hotkey;
 #[cfg(target_os = "macos")]
 pub mod macos;
