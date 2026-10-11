@@ -243,10 +243,19 @@ impl AppSource for LinuxAppSource {
 }
 
 impl LinuxAppSource {
-    /// Prefixes `argv` with the terminal emulator that runs it.
+    /// Prefixes `argv` with the terminal emulator that runs it. The emulator is resolved against
+    /// this source's search path, so it is found even when the process `PATH` differs.
     fn in_terminal(&self, argv: Vec<String>) -> io::Result<Vec<String>> {
-        let terminal = terminal_prefix(&self.path, std::env::var("TERMINAL").ok().as_deref())
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no terminal emulator found"))?;
+        let mut terminal = terminal_prefix(&self.path, std::env::var("TERMINAL").ok().as_deref())
+            .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "no terminal emulator found")
+        })?;
+        if !Path::new(&terminal[0]).is_absolute()
+            && let Some(found) =
+                self.path.iter().map(|d| d.join(&terminal[0])).find(|p| is_executable(p))
+        {
+            terminal[0] = found.to_string_lossy().into_owned();
+        }
         Ok(terminal.into_iter().chain(argv).collect())
     }
 }
