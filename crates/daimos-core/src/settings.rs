@@ -40,6 +40,23 @@ impl Default for ProviderSetting {
     }
 }
 
+/// The clipboard history. It is opt-in: copied text can contain secrets.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ClipboardSettings {
+    pub enabled: bool,
+    /// Entries kept besides the pinned ones.
+    pub max_entries: usize,
+    /// Larger images are not stored.
+    pub max_image_mb: usize,
+}
+
+impl Default for ClipboardSettings {
+    fn default() -> Self {
+        Self { enabled: false, max_entries: 500, max_image_mb: 10 }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -50,6 +67,7 @@ pub struct Settings {
     pub providers: BTreeMap<String, ProviderSetting>,
     /// Short names for what to search: typing the alias (the whole query) searches the target.
     pub aliases: BTreeMap<String, String>,
+    pub clipboard: ClipboardSettings,
 }
 
 impl Default for Settings {
@@ -59,6 +77,7 @@ impl Default for Settings {
             theme: ThemeSetting::default(),
             providers: BTreeMap::new(),
             aliases: BTreeMap::new(),
+            clipboard: ClipboardSettings::default(),
         }
     }
 }
@@ -84,6 +103,8 @@ const MIGRATIONS: &[&str] = &[
     // 2: providers on/off with weights, and aliases (JSON objects).
     "ALTER TABLE settings ADD COLUMN providers TEXT NOT NULL DEFAULT '{}';
      ALTER TABLE settings ADD COLUMN aliases   TEXT NOT NULL DEFAULT '{}';",
+    // 3: the clipboard history (a JSON object).
+    "ALTER TABLE settings ADD COLUMN clipboard TEXT NOT NULL DEFAULT '{}';",
 ];
 
 /// Reads and writes [`Settings`].
@@ -122,7 +143,7 @@ impl SettingsStore {
         let db_error = |source| SettingsError::Db { path: self.db_path(), source };
         let row = db
             .query_row(
-                "SELECT hotkey, theme, providers, aliases FROM settings WHERE id = 1",
+                "SELECT hotkey, theme, providers, aliases, clipboard FROM settings WHERE id = 1",
                 [],
                 |r| {
                     Ok((
@@ -130,17 +151,19 @@ impl SettingsStore {
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
                         r.get::<_, String>(3)?,
+                        r.get::<_, String>(4)?,
                     ))
                 },
             )
             .optional()
             .map_err(db_error)?;
         match row {
-            Some((hotkey, theme, providers, aliases)) => Ok(Settings {
+            Some((hotkey, theme, providers, aliases, clipboard)) => Ok(Settings {
                 hotkey,
                 theme: serde_json::from_value(serde_json::Value::String(theme)).unwrap_or_default(),
                 providers: serde_json::from_str(&providers).unwrap_or_default(),
                 aliases: serde_json::from_str(&aliases).unwrap_or_default(),
+                clipboard: serde_json::from_str(&clipboard).unwrap_or_default(),
             }),
             None => self.import_json(),
         }
@@ -167,13 +190,16 @@ impl SettingsStore {
         let theme =
             serde_json::to_value(settings.theme).ok().and_then(|v| v.as_str().map(str::to_owned));
         db.execute(
-            "INSERT INTO settings (id, hotkey, theme, providers, aliases) VALUES (1, ?1, ?2, ?3, ?4)
-             ON CONFLICT (id) DO UPDATE SET hotkey = ?1, theme = ?2, providers = ?3, aliases = ?4",
+            "INSERT INTO settings (id, hotkey, theme, providers, aliases, clipboard)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT (id) DO UPDATE SET hotkey = ?1, theme = ?2, providers = ?3, aliases = ?4,
+                                            clipboard = ?5",
             params![
                 settings.hotkey,
                 theme.unwrap_or_else(|| "system".into()),
                 serde_json::to_string(&settings.providers).expect("providers serialize"),
                 serde_json::to_string(&settings.aliases).expect("aliases serialize"),
+                serde_json::to_string(&settings.clipboard).expect("clipboard settings serialize"),
             ],
         )
         .map(drop)
@@ -221,6 +247,7 @@ mod tests {
                 ("apps".to_owned(), ProviderSetting { enabled: true, weight: Some(3.5) }),
             ]),
             aliases: BTreeMap::from([("ff".to_owned(), "Firefox".to_owned())]),
+            clipboard: ClipboardSettings { enabled: true, max_entries: 50, max_image_mb: 2 },
         };
         nested.save(&settings).unwrap();
         assert_eq!(nested.load().unwrap(), settings);
@@ -228,6 +255,13 @@ mod tests {
         nested.save(&Settings::default()).unwrap();
         assert_eq!(nested.load().unwrap(), Settings::default());
         drop(store);
+    }
+
+    #[test]
+    fn the_clipboard_history_is_off_by_default() {
+        let defaults = ClipboardSettings::default();
+        assert!(!defaults.enabled);
+        assert_eq!((defaults.max_entries, defaults.max_image_mb), (500, 10));
     }
 
     #[test]

@@ -11,3 +11,5 @@ coverage/
 .idea/
 /.vscode/*
 !/.vscode/extensions.json
+docs-site/dist/
+docs-site/.astro/

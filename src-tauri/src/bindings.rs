@@ -150,6 +150,20 @@ pub fn set_theme(app: AppHandle, setting: ThemeSetting) -> Result<ThemeInfo, Str
     Ok(info)
 }
 
+/// The UI listens to events now: what was sent before (a `daimos show \"text\"` right after the
+/// start) is replayed.
+#[tauri::command]
+#[specta::specta]
+pub fn ui_ready(app: AppHandle, ui: State<'_, crate::ui_ready::UiReadiness>) {
+    let (shown, query) = ui.ready();
+    if shown {
+        let _ = WindowShown.emit(&app);
+    }
+    if let Some(query) = query {
+        let _ = QuerySet(query).emit(&app);
+    }
+}
+
 /// The UI reports how many result rows it shows; the window grows or shrinks to fit.
 #[tauri::command]
 #[specta::specta]
@@ -231,6 +245,18 @@ pub struct AliasEntry {
     pub target: String,
 }
 
+/// The clipboard history as the settings page shows it.
+#[derive(Debug, Clone, Serialize, Deserialize, Type)]
+pub struct ClipboardView {
+    pub enabled: bool,
+    pub max_entries: u32,
+    pub max_image_mb: u32,
+    /// Whether the history can follow the clipboard on this system.
+    pub level: crate::capabilities::Level,
+    /// Why it is limited or unavailable.
+    pub reason: Option<String>,
+}
+
 /// The settings the page edits.
 #[derive(Debug, Clone, Serialize, Deserialize, Type)]
 pub struct SettingsView {
@@ -238,6 +264,31 @@ pub struct SettingsView {
     pub theme: ThemeSetting,
     pub providers: Vec<ProviderView>,
     pub aliases: Vec<AliasEntry>,
+    pub clipboard: ClipboardView,
+}
+
+fn clipboard_view(
+    app: &AppHandle,
+    settings: &daimos_core::settings::ClipboardSettings,
+) -> ClipboardView {
+    use crate::capabilities::Level;
+    use daimos_core::clipboard::ClipboardSupport;
+    let (level, reason) =
+        match app.try_state::<std::sync::Arc<crate::clipboard::ClipboardService>>() {
+            Some(service) => match service.support() {
+                ClipboardSupport::Full => (Level::Available, None),
+                ClipboardSupport::Limited(reason) => (Level::Limited, Some(reason)),
+                ClipboardSupport::Unsupported(reason) => (Level::Unavailable, Some(reason)),
+            },
+            None => (Level::Unavailable, Some("the clipboard history is not running".to_owned())),
+        };
+    ClipboardView {
+        enabled: settings.enabled,
+        max_entries: settings.max_entries as u32,
+        max_image_mb: settings.max_image_mb as u32,
+        level,
+        reason,
+    }
 }
 
 fn settings_view(app: &AppHandle, settings: &daimos_core::settings::Settings) -> SettingsView {
@@ -265,6 +316,7 @@ fn settings_view(app: &AppHandle, settings: &daimos_core::settings::Settings) ->
             .iter()
             .map(|(alias, target)| AliasEntry { alias: alias.clone(), target: target.clone() })
             .collect(),
+        clipboard: clipboard_view(app, &settings.clipboard),
     }
 }
 
@@ -276,6 +328,9 @@ fn apply_settings(
     config_store(app)?.save(settings).map_err(|e| e.to_string())?;
     if let Some(engine) = app.try_state::<std::sync::Arc<QueryEngine>>() {
         engine.set_config(daimos_core::query::EngineConfig::from(settings));
+    }
+    if let Some(service) = app.try_state::<std::sync::Arc<crate::clipboard::ClipboardService>>() {
+        service.apply(&settings.clipboard);
     }
     Ok(settings_view(app, settings))
 }
@@ -304,6 +359,15 @@ pub fn set_provider(
     } else {
         settings.providers.insert(id, daimos_core::settings::ProviderSetting { enabled, weight });
     }
+    apply_settings(&app, &settings)
+}
+
+/// Switches the clipboard history on or off; it starts and stops following the clipboard at once.
+#[tauri::command]
+#[specta::specta]
+pub fn set_clipboard_history(app: AppHandle, enabled: bool) -> Result<SettingsView, String> {
+    let mut settings = config_store(&app)?.load().map_err(|e| e.to_string())?;
+    settings.clipboard.enabled = enabled;
     apply_settings(&app, &settings)
 }
 
@@ -338,12 +402,11 @@ pub async fn set_hotkey(
     tauri::async_runtime::spawn_blocking(move || service.bind(&wanted)).await.map_err(|e| {
         HotkeyFailure { kind: "backend".into(), binding: None, message: e.to_string() }
     })??;
-    status.set(HotkeyStatus {
-        state: "active".into(),
-        session: status.get().session,
-        binding: Some(binding.clone()),
-        message: None,
-    });
+    status.set(crate::capabilities::bound_status(
+        &status.get().session,
+        &Binding::new(binding.clone()),
+        hotkey.backend().reported_trigger(),
+    ));
     let store = SettingsStore::new(app.path().app_config_dir().map_err(|e| HotkeyFailure {
         kind: "backend".into(),
         binding: None,
@@ -427,6 +490,7 @@ pub fn builder() -> Builder<tauri::Wry> {
             capabilities,
             set_hotkey,
             hide_window,
+            ui_ready,
             resize_window,
             first_paint,
             query,
@@ -437,7 +501,8 @@ pub fn builder() -> Builder<tauri::Wry> {
             set_theme,
             settings,
             set_provider,
-            set_aliases
+            set_aliases,
+            set_clipboard_history
         ])
         .events(collect_events![
             WindowShown,

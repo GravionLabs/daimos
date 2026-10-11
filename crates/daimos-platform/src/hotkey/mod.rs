@@ -75,6 +75,29 @@ pub trait Hotkey: Send + Sync {
     fn unregister(&self, registration: &Registration) -> Result<(), HotkeyError>;
     /// A new stream of presses; every subscriber sees every press from now on.
     fn presses(&self) -> Receiver<Press>;
+    /// The trigger the system reports for the registered shortcut, as the system words it. Only
+    /// the Wayland portal can differ from what was asked for (the compositor owns the binding);
+    /// every other backend registers exactly what it was given and returns `None`.
+    fn reported_trigger(&self) -> Option<String> {
+        None
+    }
+}
+
+/// Whether the trigger the system reports (`Alt+Space`, `<Alt>space`, `Alt + Space`, `Meta+Space`)
+/// is the binding that was asked for: same keys, in any order, with the usual synonyms.
+pub fn trigger_matches(requested: &Binding, reported: &str) -> bool {
+    fn keys(text: &str) -> std::collections::BTreeSet<String> {
+        text.split(|c: char| !c.is_alphanumeric())
+            .filter(|part| !part.is_empty())
+            .map(|part| match part.to_lowercase().as_str() {
+                "control" | "ctrl" => "ctrl".to_owned(),
+                "super" | "meta" | "logo" | "win" | "cmd" | "command" => "super".to_owned(),
+                "option" | "alt" => "alt".to_owned(),
+                other => other.to_owned(),
+            })
+            .collect()
+    }
+    keys(requested.as_str()) == keys(reported)
 }
 
 /// Picks the backend for the current window system.
@@ -135,5 +158,30 @@ impl PressBus {
 
     pub(crate) fn publish(&self, press: &Press) {
         self.senders.lock().expect("press bus lock").retain(|tx| tx.send(press.clone()).is_ok());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reported_trigger_matches_whatever_way_it_is_written() {
+        let alt_space = Binding::new("Alt+Space");
+        for same in
+            ["Alt+Space", "<Alt>space", "Alt + Space", "ALT+space", "Space+Alt", "Option+Space"]
+        {
+            assert!(trigger_matches(&alt_space, same), "{same}");
+        }
+        for different in ["Alt+K", "Ctrl+Space", "Alt+Shift+Space", "Space", ""] {
+            assert!(!trigger_matches(&alt_space, different), "{different:?}");
+        }
+    }
+
+    #[test]
+    fn modifier_synonyms_are_the_same_key() {
+        assert!(trigger_matches(&Binding::new("Ctrl+Super+K"), "<Control><Meta>k"));
+        assert!(trigger_matches(&Binding::new("Cmd+K"), "Super+K"));
+        assert!(!trigger_matches(&Binding::new("Ctrl+K"), "Super+K"));
     }
 }

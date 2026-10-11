@@ -107,7 +107,7 @@ flowchart TD
 | Hotkey to window visible (warm)       | < 50 ms  | Timestamp in the hotkey handler to first paint event |
 | Keystroke to results (apps, 2k items) | < 16 ms  | Benchmark in `daimos-core`, CI regression check    |
 | Process cold start to hotkey ready    | < 500 ms | Process start to hotkey registration                 |
-| Resident memory, idle                 | < 150 MB | Measured in CI on all three platforms                |
+| Memory, idle (app + web view)         | < 150 MB | PSS on Linux, footprint on macOS, private working set on Windows; never RSS |
 | Wasm extension call                   | < 5 ms   | Benchmark against the example extension              |
 | Script extension call (warm process)  | < 30 ms  | Benchmark against the example extension              |
 

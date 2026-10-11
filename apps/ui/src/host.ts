@@ -18,6 +18,8 @@ export interface Host {
   onShown(callback: () => void): () => void;
   /** Calls `callback` with text sent by `daimos show "text"`; returns an unsubscribe function. */
   onQuery(callback: (query: string) => void): () => void;
+  /** Tells the shell that every event listener is registered; what it sent earlier is replayed. */
+  ready(): Promise<void>;
   /** Tells the shell the first frame after a show is on screen. */
   firstPaint(): void;
   /** Starts a query for the session; the answer arrives through `onResults`. */
@@ -45,6 +47,7 @@ export interface Host {
   setTheme(setting: ThemeSetting): Promise<SettingsView>;
   setProvider(id: string, enabled: boolean, weight: number | null): Promise<SettingsView>;
   setAliases(aliases: AliasEntry[]): Promise<SettingsView>;
+  setClipboardHistory(enabled: boolean): Promise<SettingsView>;
   /** The URL the web view can load an icon from, or null when there is none (placeholder). */
   iconSrc(icon: Icon): string | null;
   hide(): void;
@@ -61,26 +64,38 @@ async function unwrap<T>(
   return done.data;
 }
 
+/** Listeners that are still being registered: `listen` is asynchronous. */
+const registrations: Promise<unknown>[] = [];
+
+function track<T>(registration: Promise<T>): Promise<T> {
+  registrations.push(registration);
+  return registration;
+}
+
 export const tauriHost: Host = {
   onShown(callback) {
-    const unlisten = events.windowShown.listen(callback);
+    const unlisten = track(events.windowShown.listen(callback));
     return () => void unlisten.then((fn) => fn());
   },
   onQuery(callback) {
-    const unlisten = events.querySet.listen((event) => callback(event.payload));
+    const unlisten = track(events.querySet.listen((event) => callback(event.payload)));
     return () => void unlisten.then((fn) => fn());
+  },
+  async ready() {
+    await Promise.all(registrations);
+    await commands.uiReady();
   },
   firstPaint: () => void commands.firstPaint(),
   query: (session, text) => void commands.query(session, text),
   onResults(callback) {
-    const unlisten = events.queryResults.listen((event) => callback(event.payload));
+    const unlisten = track(events.queryResults.listen((event) => callback(event.payload)));
     return () => void unlisten.then((fn) => fn());
   },
   runAction: (itemId, actionId) => void commands.runAction(itemId, actionId),
   copy: (text) => navigator.clipboard.writeText(text),
   theme: () => commands.theme(),
   onOpenSettings(callback) {
-    const unlisten = events.openSettings.listen(() => callback());
+    const unlisten = track(events.openSettings.listen(() => callback()));
     return () => void unlisten.then((fn) => fn());
   },
   settings: () => unwrap(commands.settings()),
@@ -95,8 +110,9 @@ export const tauriHost: Host = {
   },
   setProvider: (id, enabled, weight) => unwrap(commands.setProvider(id, enabled, weight)),
   setAliases: (aliases) => unwrap(commands.setAliases(aliases)),
+  setClipboardHistory: (enabled) => unwrap(commands.setClipboardHistory(enabled)),
   onTheme(callback) {
-    const unlisten = events.themeChanged.listen((event) => callback(event.payload));
+    const unlisten = track(events.themeChanged.listen((event) => callback(event.payload)));
     return () => void unlisten.then((fn) => fn());
   },
   async loadView(provider, viewId) {

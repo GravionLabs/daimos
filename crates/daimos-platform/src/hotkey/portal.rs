@@ -5,8 +5,8 @@
 //! binding for this app id, so later starts find `toggle` already listed and show no dialog.
 //! The preferred trigger is only a suggestion; the user may have picked another one.
 
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ashpd::desktop::Session;
@@ -30,6 +30,8 @@ enum Command {
 pub struct PortalHotkey {
     commands: tokio::sync::mpsc::UnboundedSender<Command>,
     bus: Arc<PressBus>,
+    /// What the portal says the `toggle` trigger is (see [`Hotkey::reported_trigger`]).
+    reported: Arc<Mutex<Option<String>>>,
 }
 
 impl PortalHotkey {
@@ -38,6 +40,8 @@ impl PortalHotkey {
         let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
         let bus = Arc::new(PressBus::default());
         let thread_bus = Arc::clone(&bus);
+        let reported = Arc::new(Mutex::new(None));
+        let thread_reported = Arc::clone(&reported);
         std::thread::Builder::new()
             .name("daimos-portal-hotkey".into())
             .spawn(move || {
@@ -45,10 +49,10 @@ impl PortalHotkey {
                     .enable_all()
                     .build()
                     .expect("tokio runtime");
-                runtime.block_on(serve(receiver, thread_bus, compositor));
+                runtime.block_on(serve(receiver, thread_bus, thread_reported, compositor));
             })
             .expect("spawn portal thread");
-        Self { commands, bus }
+        Self { commands, bus, reported }
     }
 
     fn call<T>(&self, command: impl FnOnce(Sender<T>) -> Command) -> Option<T> {
@@ -75,6 +79,10 @@ impl Hotkey for PortalHotkey {
     fn presses(&self) -> Receiver<Press> {
         self.bus.subscribe()
     }
+
+    fn reported_trigger(&self) -> Option<String> {
+        self.reported.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
 }
 
 struct Live {
@@ -85,17 +93,24 @@ struct Live {
 async fn serve(
     mut commands: tokio::sync::mpsc::UnboundedReceiver<Command>,
     bus: Arc<PressBus>,
+    reported: Arc<Mutex<Option<String>>>,
     compositor: String,
 ) {
     let mut live: Option<Live> = None;
+    // The binding of the last successful registration: a different one is a change of mind, so the
+    // portal is asked again; the same one after a restart finds `toggle` bound and asks nothing.
+    let mut last: Option<Binding> = None;
     while let Some(command) = commands.recv().await {
         match command {
             Command::Register { binding, reply } => {
                 // The new session first: a failed attempt keeps the old one alive.
-                let result = open(&binding, &bus, &compositor).await;
+                let rebind = should_rebind(last.as_ref(), &binding);
+                let result = open(&binding, rebind, &bus, &compositor).await;
                 let _ = reply.send(match result {
-                    Ok(opened) => {
+                    Ok((opened, trigger)) => {
                         close(live.replace(opened)).await;
+                        *reported.lock().unwrap_or_else(|e| e.into_inner()) = trigger;
+                        last = Some(binding);
                         Ok(())
                     }
                     Err(error) => Err(error),
@@ -110,6 +125,13 @@ async fn serve(
     close(live.take()).await;
 }
 
+/// A binding that differs from the last registered one is a change of mind (offer it to the
+/// portal again); the first registration of a run, or the same binding again, asks nothing of a
+/// shortcut the portal has bound already (no dialog at every start).
+fn should_rebind(last: Option<&Binding>, requested: &Binding) -> bool {
+    last.is_some_and(|previous| previous != requested)
+}
+
 async fn close(live: Option<Live>) {
     if let Some(live) = live {
         let _ = live.stop.send(());
@@ -117,11 +139,15 @@ async fn close(live: Option<Live>) {
     }
 }
 
+/// Opens a session and makes sure `toggle` is bound. `rebind` offers the portal the trigger even
+/// when `toggle` is bound already (the user changed the hotkey in the settings); what the portal
+/// keeps is its decision, so the trigger it reports is returned along with the session.
 async fn open(
     binding: &Binding,
+    rebind: bool,
     bus: &Arc<PressBus>,
     compositor: &str,
-) -> Result<Live, HotkeyError> {
+) -> Result<(Live, Option<String>), HotkeyError> {
     let unsupported = |error: ashpd::Error| {
         log::info!("GlobalShortcuts portal unavailable: {error}");
         HotkeyError::Unsupported { compositor: compositor.to_owned() }
@@ -139,21 +165,31 @@ async fn open(
     let portal = GlobalShortcuts::new().await.map_err(unsupported)?;
     let session = portal.create_session(Default::default()).await.map_err(unsupported)?;
 
-    let bound = portal
-        .list_shortcuts(&session, Default::default())
-        .await
-        .and_then(|request| request.response())
-        .map(|list| list.shortcuts().iter().any(|s| s.id() == TOGGLE_ID))
-        .map_err(|e| HotkeyError::Backend(e.to_string()))?;
-    if !bound {
+    let backend = |e: ashpd::Error| HotkeyError::Backend(e.to_string());
+    let listed = || async {
+        portal
+            .list_shortcuts(&session, Default::default())
+            .await
+            .and_then(|request| request.response())
+            .map(|list| {
+                list.shortcuts()
+                    .iter()
+                    .find(|s| s.id() == TOGGLE_ID)
+                    .map(|s| s.trigger_description().to_owned())
+            })
+    };
+    let bound = listed().await.map_err(backend)?;
+    if bound.is_none() || rebind {
         let shortcut = NewShortcut::new(TOGGLE_ID, "Show or hide Daimos")
             .preferred_trigger(trigger_for(binding)?.as_str());
         portal
             .bind_shortcuts(&session, &[shortcut], None, BindShortcutsOptions::default())
             .await
             .and_then(|request| request.response())
-            .map_err(|e| HotkeyError::Backend(e.to_string()))?;
+            .map_err(backend)?;
     }
+    // Whatever the portal ended up with: it, not the app, owns the key combination.
+    let trigger = listed().await.ok().flatten().filter(|t| !t.trim().is_empty());
 
     let mut activated =
         portal.receive_activated().await.map_err(|e| HotkeyError::Backend(e.to_string()))?;
@@ -173,7 +209,7 @@ async fn open(
             }
         }
     });
-    Ok(Live { session, stop })
+    Ok((Live { session, stop }, trigger))
 }
 
 /// Turns `Alt+Space` into the portal's `ALT+space` (XDG shortcuts specification: upper-case
@@ -234,5 +270,14 @@ mod tests {
         assert!(matches!(trigger("Hyper+A"), Err(HotkeyError::Invalid { .. })));
         assert!(matches!(trigger("Ctrl+Banana"), Err(HotkeyError::Invalid { .. })));
         assert!(matches!(trigger(""), Err(HotkeyError::Invalid { .. })));
+    }
+
+    #[test]
+    fn only_a_changed_binding_is_offered_to_the_portal_again() {
+        let alt = Binding::new("Alt+Space");
+        let other = Binding::new("Ctrl+Alt+K");
+        assert!(!should_rebind(None, &alt), "the first registration of a run");
+        assert!(!should_rebind(Some(&alt), &alt), "the same binding again");
+        assert!(should_rebind(Some(&alt), &other), "a change in the settings");
     }
 }
