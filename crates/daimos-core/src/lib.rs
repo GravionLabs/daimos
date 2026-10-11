@@ -18,5 +18,5 @@ pub mod ranker;
 pub mod settings;
 
 pub use model::{Action, ActionKind, Detail, Icon, Item, ItemBatch, View};
-pub use provider::{Provider, QueryContext};
+pub use provider::{ActionEffect, Provider, QueryContext};
 pub use query::{QueryEngine, ResultBatch};

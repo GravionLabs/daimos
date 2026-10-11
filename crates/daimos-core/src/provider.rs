@@ -18,6 +18,15 @@ pub struct QueryContext {
     pub cancel: CancellationToken,
 }
 
+/// What the shell does after a provider ran an action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionEffect {
+    /// The window hides (the action did its job, for example a paste).
+    Hide,
+    /// The window stays and the list is refreshed (the action changed the list, for example pin).
+    Stay,
+}
+
 pub trait Provider: Send + Sync {
     fn id(&self) -> &str;
 
@@ -40,6 +49,11 @@ pub trait Provider: Send + Sync {
 
     /// The view a `push` or `form` action points to. Providers without views keep the default.
     fn view(&self, _view_id: &str) -> Option<View> {
+        None
+    }
+
+    /// Runs an action of one of its items. `None` means the item is not this provider's.
+    fn run_action(&self, _item_id: &str, _action_id: &str) -> Option<Result<ActionEffect, String>> {
         None
     }
 

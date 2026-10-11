@@ -103,3 +103,16 @@ export function highlightRuns(
 export function providerOf(results: Results, itemId: string): string | null {
   return results.providers.find((p) => results.byProvider[p]?.some((i) => i.id === itemId)) ?? null;
 }
+
+/**
+ * Whether a keyboard event is the shortcut an action names, like `Ctrl+Enter` or `Ctrl+P`. Ctrl
+ * stands for Cmd on macOS, so either modifier counts.
+ */
+export function matchesShortcut(event: KeyboardEvent, shortcut: string): boolean {
+  const parts = shortcut.split("+");
+  const key = parts.pop() ?? "";
+  const wants = (name: string) => parts.includes(name);
+  if ((event.ctrlKey || event.metaKey) !== wants("Ctrl")) return false;
+  if (event.shiftKey !== wants("Shift") || event.altKey !== wants("Alt")) return false;
+  return event.key.toLowerCase() === key.toLowerCase();
+}
