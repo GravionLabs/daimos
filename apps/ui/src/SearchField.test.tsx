@@ -2,9 +2,16 @@ import { fireEvent, render, screen } from "@solidjs/testing-library";
 import { createSignal } from "solid-js";
 import { SearchField } from "./SearchField";
 
-function Harness(props: { onEscape?: () => void }) {
+function Harness(props: { onEscape?: () => void; onSettings?: () => void }) {
   const [query, setQuery] = createSignal("");
-  return <SearchField query={query()} onQuery={setQuery} onEscape={props.onEscape ?? (() => {})} />;
+  return (
+    <SearchField
+      query={query()}
+      onQuery={setQuery}
+      onEscape={props.onEscape ?? (() => {})}
+      onSettings={props.onSettings ?? (() => {})}
+    />
+  );
 }
 
 describe("SearchField", () => {
@@ -30,5 +37,14 @@ describe("SearchField", () => {
     render(() => <Harness onEscape={onEscape} />);
     fireEvent.keyDown(screen.getByRole("searchbox"), { key: "Escape" });
     expect(onEscape).toHaveBeenCalledOnce();
+  });
+
+  it("has a settings button that says which key opens the settings too", () => {
+    const onSettings = vi.fn();
+    render(() => <Harness onSettings={onSettings} />);
+    const button = screen.getByRole("button", { name: "Settings" });
+    expect(button.title).toMatch(/^Settings \((Ctrl|Cmd)\+,\)$/);
+    fireEvent.click(button);
+    expect(onSettings).toHaveBeenCalledOnce();
   });
 });

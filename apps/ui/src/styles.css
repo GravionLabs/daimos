@@ -53,17 +53,44 @@ body {
   padding: 12px;
 }
 
+.search-row {
+  position: relative;
+}
+
 .search {
   width: 100%;
   /* 52px + the 12px padding of .palette twice = the 76px search row the window is sized for */
   height: 52px;
-  padding: 0 14px;
+  padding: 0 52px 0 14px;
   border: 0;
   border-radius: 8px;
   outline: 2px solid transparent;
+  /* Inside the box: the result list below is painted later and would cover an outer outline. */
+  outline-offset: -2px;
   background: transparent;
   color: inherit;
   font-size: 1.25rem;
+}
+
+.settings-button {
+  position: absolute;
+  top: 10px;
+  right: 8px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 1.125rem;
+  cursor: pointer;
+}
+
+.settings-button:hover,
+.settings-button:focus-visible {
+  background: var(--selected);
+  color: var(--fg);
 }
 
 .search:focus {
@@ -358,6 +385,14 @@ kbd {
 .settings input[type="number"] {
   width: 5rem;
 }
+
+/* A label sits a little away from its checkbox, radio button or field. */
+.settings label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 
 .settings button {
   padding: 4px 10px;
