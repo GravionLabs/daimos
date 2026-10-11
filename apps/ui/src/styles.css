@@ -497,3 +497,19 @@ input[type="checkbox"],
 input[type="radio"] {
   accent-color: var(--accent);
 }
+
+.detail-image {
+  margin: 0;
+}
+
+.detail-image img {
+  max-width: 100%;
+  max-height: 340px;
+  object-fit: contain;
+}
+
+.detail-image figcaption {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}

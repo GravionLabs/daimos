@@ -118,7 +118,9 @@ export type ClipboardView = {
 	reason: string | null,
 };
 
-export type Detail = { type: "markdown"; text: string } | { type: "metadata"; entries: ([string, string])[] };
+export type Detail = { type: "markdown"; text: string } | { type: "metadata"; entries: ([string, string])[] } | 
+/**  A picture, as a `data:` URL, with a line of text under it. */
+{ type: "image"; data_url: string; caption: string };
 
 export type FormField = {
 	id: string,

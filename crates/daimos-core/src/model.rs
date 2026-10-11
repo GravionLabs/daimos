@@ -43,8 +43,17 @@ pub struct Action {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Detail {
-    Markdown { text: String },
-    Metadata { entries: Vec<(String, String)> },
+    Markdown {
+        text: String,
+    },
+    Metadata {
+        entries: Vec<(String, String)>,
+    },
+    /// A picture, as a `data:` URL, with a line of text under it.
+    Image {
+        data_url: String,
+        caption: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]

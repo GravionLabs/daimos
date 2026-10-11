@@ -283,3 +283,58 @@ describe("paste", () => {
     expect(await screen.findByText("Copied. install wtype")).toBeInTheDocument();
   });
 });
+
+describe("shortcuts of actions and refreshing after a change", () => {
+  const entry = (extra: Partial<Item> = {}) =>
+    item("clip:#1", {
+      title: "hello",
+      actions: [
+        { id: "paste", title: "Paste", shortcut: "Enter", kind: "paste", payload: "hello" },
+        { id: "copy", title: "Copy", shortcut: "Ctrl+Enter", kind: "copy", payload: "hello" },
+        { id: "pin", title: "Pin", shortcut: "Ctrl+P", kind: "run", payload: null },
+        { id: "delete", title: "Delete", shortcut: "Ctrl+Backspace", kind: "run", payload: null },
+      ],
+      ...extra,
+    });
+
+  function list() {
+    const fake = fakeHost();
+    render(() => <App host={fake.host} />);
+    fake.send(batch(0, [entry()]));
+    return { ...fake, box: screen.getByRole("searchbox") };
+  }
+
+  it("Ctrl+Enter copies only, Cmd works like Ctrl", async () => {
+    const { host, box } = list();
+    fireEvent.keyDown(box, { key: "Enter", ctrlKey: true });
+    await waitFor(() => expect(host.copy).toHaveBeenCalledExactlyOnceWith("hello"));
+    expect(host.paste).not.toHaveBeenCalled();
+    fireEvent.keyDown(box, { key: "Enter", metaKey: true });
+    await waitFor(() => expect(host.copy).toHaveBeenCalledTimes(2));
+  });
+
+  it("Ctrl+P pins and Ctrl+Backspace deletes, then the search runs again", async () => {
+    const { host, box } = list();
+    fireEvent.input(box, { target: { value: "clip hello" } });
+    vi.mocked(host.query).mockClear();
+    fireEvent.keyDown(box, { key: "p", ctrlKey: true });
+    await waitFor(() => expect(host.runAction).toHaveBeenCalledWith("clip:#1", "pin"));
+    await waitFor(() => expect(host.query).toHaveBeenCalledExactlyOnceWith(1, "clip hello"));
+    fireEvent.keyDown(box, { key: "Backspace", ctrlKey: true });
+    await waitFor(() => expect(host.runAction).toHaveBeenCalledWith("clip:#1", "delete"));
+  });
+
+  it("a plain Backspace or P is not a shortcut", () => {
+    const { host, box } = list();
+    fireEvent.keyDown(box, { key: "Backspace" });
+    fireEvent.keyDown(box, { key: "p" });
+    expect(host.runAction).not.toHaveBeenCalled();
+  });
+
+  it("shows a failed action as a toast", async () => {
+    const { host, box } = list();
+    vi.mocked(host.runAction).mockRejectedValueOnce("no action pin");
+    fireEvent.keyDown(box, { key: "p", ctrlKey: true });
+    expect(await screen.findByText("no action pin")).toBeInTheDocument();
+  });
+});
