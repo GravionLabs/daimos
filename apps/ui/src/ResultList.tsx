@@ -18,12 +18,18 @@ function Title(props: { title: string; highlight?: number[] }) {
 function ItemIcon(props: { icon: Icon | null; title: string; src: (icon: Icon) => string | null }) {
   const [broken, setBroken] = createSignal(false);
   const url = () => (props.icon ? props.src(props.icon) : null);
+  // A named icon that is one symbol (`=` for a calculation) is drawn as is; others show the initial.
+  const glyph = () => {
+    if (props.icon?.type === "named" && Array.from(props.icon.name).length === 1)
+      return props.icon.name;
+    return Array.from(props.title)[0]?.toUpperCase();
+  };
   return (
     <Show
       when={url() && !broken()}
       fallback={
         <span class="icon placeholder" aria-hidden="true">
-          {Array.from(props.title)[0]?.toUpperCase()}
+          {glyph()}
         </span>
       }
     >

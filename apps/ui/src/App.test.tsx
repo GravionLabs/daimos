@@ -110,6 +110,13 @@ describe("result list", () => {
     expect(at(rows, 0).querySelector(".placeholder")).toHaveTextContent("W");
   });
 
+  it("draws a one-symbol named icon as the placeholder glyph", () => {
+    const { host, send } = fakeHost();
+    render(() => <App host={host} />);
+    send(batch(0, [item("14", { icon: { type: "named", name: "=" } })]));
+    expect(screen.getByRole("option").querySelector(".placeholder")).toHaveTextContent("=");
+  });
+
   it("moves the selection with the arrow keys, Home and End", () => {
     const { host, send } = fakeHost();
     render(() => <App host={host} />);
