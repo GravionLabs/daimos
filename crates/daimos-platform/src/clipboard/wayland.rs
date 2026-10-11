@@ -3,8 +3,8 @@
 //! Plasma).
 //!
 //! GNOME's compositor has no such protocol. There [`WaylandClipboard::support`] reports `Limited`
-//! and [`WaylandClipboard::watch`] only waits: the app feeds the history while its own window is
-//! focused (see the clipboard setting of the app).
+//! and [`WaylandClipboard::watch`] only waits, so nothing is recorded yet. Recording while the
+//! Daimos window is focused is a separate piece of work.
 
 use std::collections::HashMap;
 use std::io::{self, Read};
@@ -56,8 +56,8 @@ impl ClipboardBackend for WaylandClipboard {
         match Self::has_data_control() {
             Ok(true) => ClipboardSupport::Full,
             Ok(false) => ClipboardSupport::Limited(
-                "this compositor has no wlr-data-control; the clipboard is recorded only while \
-                 the Daimos window is focused"
+                "this compositor has no wlr-data-control (GNOME), so copied content is not \
+                 recorded yet"
                     .into(),
             ),
             Err(reason) => ClipboardSupport::Unsupported(reason),

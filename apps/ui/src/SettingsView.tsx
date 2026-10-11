@@ -177,6 +177,29 @@ export function SettingsView(props: { host: Host; onClose: () => void }) {
               }
             />
 
+            <h3>Clipboard history</h3>
+            <label>
+              <input
+                type="checkbox"
+                checked={current().clipboard.enabled}
+                disabled={current().clipboard.level === "unavailable"}
+                onChange={(event) =>
+                  void change(() => props.host.setClipboardHistory(event.currentTarget.checked))
+                }
+              />
+              Remember what I copy
+            </label>
+            <p class="hint">
+              Off by default. Text and images are kept on this computer (up to{" "}
+              {current().clipboard.max_entries} entries); content that a password manager marks as
+              secret is never stored.
+            </p>
+            <Show when={current().clipboard.reason}>
+              <p class="hint" data-level={current().clipboard.level}>
+                {current().clipboard.reason}
+              </p>
+            </Show>
+
             <h3>Platform</h3>
             <ul class="capabilities">
               <For each={capabilities()?.items ?? []}>

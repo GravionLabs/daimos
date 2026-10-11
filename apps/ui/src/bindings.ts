@@ -45,6 +45,8 @@ export const commands = {
 	setProvider: (id: string, enabled: boolean, weight: number | null) => typedError<SettingsView, string>(__TAURI_INVOKE("set_provider", { id, enabled, weight })),
 	/**  Replaces the aliases; applies live. Empty names and duplicates (ignoring case) are dropped. */
 	setAliases: (aliases: AliasEntry[]) => typedError<SettingsView, string>(__TAURI_INVOKE("set_aliases", { aliases })),
+	/**  Switches the clipboard history on or off; it starts and stops following the clipboard at once. */
+	setClipboardHistory: (enabled: boolean) => typedError<SettingsView, string>(__TAURI_INVOKE("set_clipboard_history", { enabled })),
 };
 
 /** Events */
@@ -97,6 +99,17 @@ export type Capability = {
 	reason: string,
 	/**  Steps the user can take, shown below the reason (a compositor configuration, for example). */
 	instructions: string | null,
+};
+
+/**  The clipboard history as the settings page shows it. */
+export type ClipboardView = {
+	enabled: boolean,
+	max_entries: number,
+	max_image_mb: number,
+	/**  Whether the history can follow the clipboard on this system. */
+	level: Level,
+	/**  Why it is limited or unavailable. */
+	reason: string | null,
 };
 
 export type Detail = { type: "markdown"; text: string } | { type: "metadata"; entries: ([string, string])[] };
@@ -180,6 +193,7 @@ export type SettingsView = {
 	theme: ThemeSetting,
 	providers: ProviderView[],
 	aliases: AliasEntry[],
+	clipboard: ClipboardView,
 };
 
 /**  Emitted when the OS theme or the theme setting changes. */

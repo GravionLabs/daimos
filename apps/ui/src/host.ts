@@ -47,6 +47,7 @@ export interface Host {
   setTheme(setting: ThemeSetting): Promise<SettingsView>;
   setProvider(id: string, enabled: boolean, weight: number | null): Promise<SettingsView>;
   setAliases(aliases: AliasEntry[]): Promise<SettingsView>;
+  setClipboardHistory(enabled: boolean): Promise<SettingsView>;
   /** The URL the web view can load an icon from, or null when there is none (placeholder). */
   iconSrc(icon: Icon): string | null;
   hide(): void;
@@ -109,6 +110,7 @@ export const tauriHost: Host = {
   },
   setProvider: (id, enabled, weight) => unwrap(commands.setProvider(id, enabled, weight)),
   setAliases: (aliases) => unwrap(commands.setAliases(aliases)),
+  setClipboardHistory: (enabled) => unwrap(commands.setClipboardHistory(enabled)),
   onTheme(callback) {
     const unlisten = track(events.themeChanged.listen((event) => callback(event.payload)));
     return () => void unlisten.then((fn) => fn());
