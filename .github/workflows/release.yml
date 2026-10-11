@@ -1,0 +1,42 @@
+name: release
+
+# A push to main (the merge of a release branch) versions the build with GitVersion (GitVersion.yml),
+# builds the CLI binaries and the installers and publishes one GitHub release, marked as a
+# pre-release until the first stable version. Every other run builds with the version
+# 0.0.<run number> and publishes nothing: that is what the pull_request trigger below is for, so a
+# change to this workflow is tried before it matters. macOS and Windows runners cost 10x and 2x a
+# Linux minute: the workflow does not run on other pull requests.
+#
+# The pipeline lives in GravionLabs/ci (tauri-app.yml); this file says what Daimos builds.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  # A release in progress is never cancelled.
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    uses: GravionLabs/ci/.github/workflows/tauri-app.yml@main
+    permissions:
+      contents: write
+    with:
+      # The shared checks job has no GTK and WebKit libraries: it skips the crates that need them
+      # (the app, and the platform crate that depends on tauri). ci.yml covers both on every pull request.
+      ci-exclude: daimos-app daimos-platform
+      cli-package: daimos-cli
+      cli-binary: daimos
+      tauri: true
+      # No Linux installer yet: the shared installer job does not install libgtk-layer-shell-dev, which
+      # the Wayland overlay needs to build (see docs/releasing.md). Linux gets the CLI binaries for now.
+      installer-matrix: '[{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]'
+    secrets: inherit
