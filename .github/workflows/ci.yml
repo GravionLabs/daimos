@@ -30,9 +30,10 @@ jobs:
       fail-fast: false
       matrix:
         # macOS and Windows runners cost 10x and 2x a Linux minute: a pull request into a release
-        # branch runs the two Linux jobs only. The full matrix runs for pull requests into main
-        # (the release PR) and for pushes to main.
-        include: ${{ fromJSON((github.event_name == 'push' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-matrix')) && '[{"name":"Ubuntu (X11)","os":"ubuntu-latest","session":"x11"},{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"},{"name":"Windows","os":"windows-latest","session":"native"},{"name":"macOS","os":"macos-latest","session":"native"}]' || '[{"name":"Ubuntu (X11)","os":"ubuntu-latest","session":"x11"},{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"}]') }}
+        # branch runs the Linux job with headless sway only. The full matrix (plus Windows and macOS)
+        # runs for pull requests into main (the release PR), for pushes to main, and for pull requests
+        # with the `full-matrix` label. The X11 job runs only when asked for: add the `x11` label.
+        include: ${{ fromJSON((github.event_name == 'push' || github.base_ref == 'main' || contains(github.event.pull_request.labels.*.name, 'full-matrix')) && (contains(github.event.pull_request.labels.*.name, 'x11') && '[{"name":"Ubuntu (X11)","os":"ubuntu-latest","session":"x11"},{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"},{"name":"Windows","os":"windows-latest","session":"native"},{"name":"macOS","os":"macos-latest","session":"native"}]' || '[{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"},{"name":"Windows","os":"windows-latest","session":"native"},{"name":"macOS","os":"macos-latest","session":"native"}]') || (contains(github.event.pull_request.labels.*.name, 'x11') && '[{"name":"Ubuntu (X11)","os":"ubuntu-latest","session":"x11"},{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"}]' || '[{"name":"Ubuntu (Wayland, sway)","os":"ubuntu-latest","session":"wayland"}]')) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install Linux packages
@@ -94,25 +95,25 @@ jobs:
           cargo build -p daimos-app -p daimos-cli --features custom-protocol
           export WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1
           MEASURE_LABEL="Ubuntu X11" xvfb-run --auto-servernum python3 scripts/ci/measure-app.py
-      # Both color schemes of the palette, for a look at the pull request (#48).
-      - name: Screenshots of both themes (X11)
-        if: matrix.session == 'x11'
-        run: |
-          sudo apt-get install -y imagemagick
-          xvfb-run --auto-servernum -s "-screen 0 1280x800x24" scripts/ci/screenshots.sh
-      - name: Upload the screenshots
-        if: matrix.session == 'x11'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: theme-screenshots
-          path: target/screenshots/*.png
-          if-no-files-found: error
       - name: Measure the app (headless sway)
         if: matrix.session == 'wayland'
         run: |
           cargo build -p daimos-app -p daimos-cli --features custom-protocol
           export WEBKIT_DISABLE_COMPOSITING_MODE=1 WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1 GDK_BACKEND=wayland
           MEASURE_LABEL="Ubuntu Wayland (sway)" scripts/ci/run-in-sway.sh python3 scripts/ci/measure-app.py
+      # Both color schemes of the palette, for a look at the pull request (#48).
+      - name: Screenshots of both themes
+        if: matrix.session == 'wayland'
+        run: |
+          sudo apt-get install -y imagemagick
+          xvfb-run --auto-servernum -s "-screen 0 1280x800x24" scripts/ci/screenshots.sh
+      - name: Upload the screenshots
+        if: matrix.session == 'wayland'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: theme-screenshots
+          path: target/screenshots/*.png
+          if-no-files-found: error
       - name: Measure the app
         if: matrix.session == 'native'
         shell: bash
@@ -124,10 +125,10 @@ jobs:
       # rpm bundling hangs on the runner and AppImage needs extra tools: the debug bundle on Linux is
       # the deb; the full set of packages is the v1.0 packaging work.
       - name: Debug bundle
-        if: matrix.session != 'wayland'
+        if: matrix.session != 'x11'
         run: pnpm tauri build --debug ${{ runner.os == 'Linux' && '--bundles deb' || '' }}
       - name: Upload the debug bundle
-        if: matrix.session != 'wayland'
+        if: matrix.session != 'x11'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: daimos-debug-${{ matrix.os }}

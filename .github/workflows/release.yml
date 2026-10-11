@@ -36,7 +36,6 @@ jobs:
       cli-package: daimos-cli
       cli-binary: daimos
       tauri: true
-      # No Linux installer yet: the shared installer job does not install libgtk-layer-shell-dev, which
-      # the Wayland overlay needs to build (see docs/releasing.md). Linux gets the CLI binaries for now.
-      installer-matrix: '[{"os":"macos-latest","target":"aarch64-apple-darwin"},{"os":"windows-latest","target":"x86_64-pc-windows-msvc"}]'
+      # The Wayland overlay links libgtk-layer-shell, which the shared installer job does not install by itself.
+      installer-linux-packages: libgtk-layer-shell-dev
     secrets: inherit
