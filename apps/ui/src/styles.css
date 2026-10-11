@@ -393,7 +393,6 @@ kbd {
   gap: 8px;
 }
 
-
 .settings button {
   padding: 4px 10px;
   border: 1px solid var(--selected);
