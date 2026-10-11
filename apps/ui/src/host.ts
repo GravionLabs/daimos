@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { commands, events, type Icon, type ResultBatch } from "./bindings";
+import { commands, events, type Icon, type ResultBatch, type View } from "./bindings";
 
 /** What the palette needs from the Rust shell; tests replace it. */
 export interface Host {
@@ -15,6 +15,12 @@ export interface Host {
   onResults(callback: (batch: ResultBatch) => void): () => void;
   /** Runs an action of a result (the window hides when it succeeded). */
   runAction(itemId: string, actionId: string): void;
+  /** Puts text on the clipboard. */
+  copy(text: string): Promise<void>;
+  /** The view a `push` or `form` action of a result of `provider` points to. */
+  loadView(provider: string, viewId: string): Promise<View>;
+  /** Hands the values of a submitted form to its provider. */
+  submitForm(provider: string, viewId: string, values: Record<string, string>): Promise<void>;
   /** The URL the web view can load an icon from, or null when there is none (placeholder). */
   iconSrc(icon: Icon): string | null;
   hide(): void;
@@ -38,6 +44,16 @@ export const tauriHost: Host = {
     return () => void unlisten.then((fn) => fn());
   },
   runAction: (itemId, actionId) => void commands.runAction(itemId, actionId),
+  copy: (text) => navigator.clipboard.writeText(text),
+  async loadView(provider, viewId) {
+    const result = await commands.loadView(provider, viewId);
+    if (result.status === "error") throw new Error(result.error);
+    return result.data;
+  },
+  async submitForm(provider, viewId, values) {
+    const result = await commands.submitForm(provider, viewId, values);
+    if (result.status === "error") throw new Error(result.error);
+  },
   iconSrc(icon) {
     if (icon.type === "file") return convertFileSrc(icon.path);
     if (icon.type === "dataUrl") return icon.url;

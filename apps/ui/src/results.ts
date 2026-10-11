@@ -82,3 +82,8 @@ export function highlightRuns(
   }
   return runs;
 }
+
+/** The provider that returned the item. */
+export function providerOf(results: Results, itemId: string): string | null {
+  return results.providers.find((p) => results.byProvider[p]?.some((i) => i.id === itemId)) ?? null;
+}

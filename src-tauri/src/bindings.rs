@@ -76,6 +76,29 @@ pub fn run_action(
     Ok(())
 }
 
+/// The view a `push` or `form` action of a result of `provider` points to.
+#[tauri::command]
+#[specta::specta]
+pub fn load_view(
+    engine: State<'_, std::sync::Arc<QueryEngine>>,
+    provider: String,
+    view_id: String,
+) -> Result<View, String> {
+    engine.view(&provider, &view_id).ok_or_else(|| format!("{provider} has no view {view_id}"))
+}
+
+/// Hands the values of a submitted form to its provider.
+#[tauri::command]
+#[specta::specta]
+pub fn submit_form(
+    engine: State<'_, std::sync::Arc<QueryEngine>>,
+    provider: String,
+    view_id: String,
+    values: std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    engine.submit(&provider, &view_id, &values)
+}
+
 /// The UI reports how many result rows it shows; the window grows or shrinks to fit.
 #[tauri::command]
 #[specta::specta]
@@ -244,7 +267,9 @@ pub fn builder() -> Builder<tauri::Wry> {
             resize_window,
             first_paint,
             query,
-            run_action
+            run_action,
+            load_view,
+            submit_form
         ])
         .events(collect_events![
             WindowShown,

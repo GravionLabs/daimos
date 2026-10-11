@@ -89,7 +89,7 @@ pub struct FormField {
 
 /// What a provider answers with. Views are data; the webview renders them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum View {
     List { items: Vec<Item> },
     Detail { detail: Detail },

@@ -79,6 +79,26 @@ impl QueryEngine {
         }
     }
 
+    /// The view `view_id` of `provider`, for a `push` or `form` action.
+    pub fn view(&self, provider: &str, view_id: &str) -> Option<crate::model::View> {
+        self.providers.iter().find(|p| p.id() == provider)?.view(view_id)
+    }
+
+    /// Hands the values of a submitted form to its provider.
+    pub fn submit(
+        &self,
+        provider: &str,
+        view_id: &str,
+        values: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        let provider = self
+            .providers
+            .iter()
+            .find(|p| p.id() == provider)
+            .ok_or_else(|| format!("no provider {provider}"))?;
+        provider.submit(view_id, values)
+    }
+
     /// Stops the query of a session, for example when the window hides.
     pub fn cancel(&self, session: u32) {
         let running = self.sessions.lock().unwrap_or_else(|e| e.into_inner()).remove(&session);
@@ -323,6 +343,51 @@ mod tests {
         assert_eq!(until_done(&mut rx, 2).await.iter().filter(|b| b.done).count(), 2);
         engine.query(1, "zz thing");
         assert_eq!(until_done(&mut rx, 2).await.iter().filter(|b| b.done).count(), 2);
+    }
+
+    /// A provider with one list view and a form that accepts a value of `name` only.
+    struct WithViews;
+
+    impl Provider for WithViews {
+        fn id(&self) -> &str {
+            "views"
+        }
+        fn query(&self, _: QueryContext) -> BoxStream<'static, ItemBatch> {
+            stream::empty().boxed()
+        }
+        fn view(&self, view_id: &str) -> Option<crate::model::View> {
+            (view_id == "list")
+                .then(|| crate::model::View::List { items: vec![Item::new("x", "X")] })
+        }
+        fn submit(&self, view_id: &str, values: &HashMap<String, String>) -> Result<(), String> {
+            match (view_id, values.get("name")) {
+                ("form", Some(name)) if !name.is_empty() => Ok(()),
+                _ => Err("name is required".into()),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn views_and_forms_are_routed_to_their_provider() {
+        let (tx, _rx) = mpsc::unbounded_channel::<ResultBatch>();
+        let sink: Sink = Arc::new(move |b| {
+            let _ = tx.send(b);
+        });
+        let engine = QueryEngine::new(
+            vec![Arc::new(WithViews), Arc::new(Fake::new("plain", vec![]))],
+            sink,
+            Handle::current(),
+        );
+        assert!(matches!(engine.view("views", "list"), Some(crate::model::View::List { .. })));
+        assert!(engine.view("views", "missing").is_none());
+        assert!(engine.view("plain", "list").is_none());
+        assert!(engine.view("nobody", "list").is_none());
+
+        let name = |v: &str| HashMap::from([("name".to_owned(), v.to_owned())]);
+        assert_eq!(engine.submit("views", "form", &name("Ada")), Ok(()));
+        assert_eq!(engine.submit("views", "form", &name("")), Err("name is required".into()));
+        assert!(engine.submit("plain", "form", &name("Ada")).is_err());
+        assert!(engine.submit("nobody", "form", &name("Ada")).unwrap_err().contains("no provider"));
     }
 
     #[tokio::test]

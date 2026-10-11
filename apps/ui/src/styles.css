@@ -135,3 +135,148 @@ body {
     transition: background-color 80ms;
   }
 }
+
+.split {
+  display: flex;
+  gap: 8px;
+}
+
+.split > .results {
+  flex: 1;
+  min-width: 0;
+}
+
+.split[data-detail="true"] > .results {
+  flex: 0 0 42%;
+}
+
+.detail {
+  flex: 1;
+  overflow-y: auto;
+  max-height: 416px;
+  padding: 4px 12px;
+  border-left: 1px solid var(--selected);
+  font-size: 0.875rem;
+}
+
+.detail dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.detail dd {
+  margin: 0 0 8px;
+  overflow-wrap: anywhere;
+}
+
+.detail pre,
+.detail code {
+  font-family: ui-monospace, monospace;
+}
+
+.detail pre {
+  overflow-x: auto;
+}
+
+.md-heading {
+  font-weight: 600;
+}
+
+.empty {
+  color: var(--muted);
+}
+
+.crumb {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 52px;
+  padding: 0 14px;
+  font-size: 1.125rem;
+}
+
+.back {
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.actions {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  min-width: 260px;
+  padding: 8px;
+  border-radius: 10px;
+  background: var(--bg);
+  box-shadow: 0 4px 24px rgb(0 0 0 / 0.35);
+}
+
+.action {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 6px;
+}
+
+.action[data-selected="true"] {
+  background: var(--selected);
+}
+
+kbd {
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.75rem;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 14px 12px;
+}
+
+.form .field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.form input {
+  padding: 8px 10px;
+  border: 1px solid var(--selected);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.form input[aria-invalid="true"] {
+  border-color: #d9534f;
+}
+
+.error {
+  color: #d9534f;
+  font-size: 0.8125rem;
+}
+
+.toast {
+  position: absolute;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--fg);
+  color: var(--bg);
+  font-size: 0.8125rem;
+}
+
+.palette {
+  position: relative;
+}
