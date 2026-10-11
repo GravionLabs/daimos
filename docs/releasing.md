@@ -13,9 +13,10 @@ A release is the merge of a release branch into `main`. Everything after the mer
    sway, Windows, macOS) and `cargo deny`. The X11 job is not part of it; add the `x11` label to a
    pull request to run it.
 3. **Merge it with a merge commit** (never squash). The push to `main` starts `release.yml`. The
-   version of a new minor release comes from GitVersion only if a commit of the release says so:
-   one commit message needs `+semver: minor` (`+semver: major` for a major release). Without it the
-   release is numbered as the next beta of the previous minor (0.2 came out as `0.1.0-beta.48`).
+   version of a new minor release comes from `next-version` in `GitVersion.yml`: set it to
+   `<x.y>.0` in the first pull request into the release branch. While the last tag is a
+   pre-release, neither the branch name nor `+semver: minor` raises the version (0.2 came out as
+   `0.1.0-beta.48` and `0.1.0-beta.51` before this was set).
 4. **`release.yml`** determines the version with GitVersion (`GitVersion.yml`), builds the CLI
    binaries (Linux x86_64 and arm64, macOS arm64, Windows x86_64) and the installers (`deb`, `nsis`,
    `dmg`), and publishes the GitHub release `v<version>` with the notes of git-cliff. Until the first
