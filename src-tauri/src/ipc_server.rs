@@ -48,6 +48,27 @@ fn handle_request(app: &AppHandle<Wry>, request: Request) -> Response {
             let app = app.clone();
             std::thread::spawn(move || app.exit(0));
         }
+        Request::IndexRebuild => {
+            return match index(app).map(|index| index.rebuild()) {
+                Some(Ok(status)) => Response::Index(status),
+                Some(Err(error)) => Response::Error { message: format!("reindex failed: {error}") },
+                None => {
+                    Response::Error { message: "the application index is not available".into() }
+                }
+            };
+        }
+        Request::IndexStatus => {
+            return match index(app) {
+                Some(index) => Response::Index(index.status()),
+                None => {
+                    Response::Error { message: "the application index is not available".into() }
+                }
+            };
+        }
     }
     Response::Ok
+}
+
+fn index(app: &AppHandle<Wry>) -> Option<std::sync::Arc<daimos_core::index::IndexService>> {
+    app.try_state::<std::sync::Arc<daimos_core::index::IndexService>>().map(|s| s.inner().clone())
 }

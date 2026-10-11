@@ -26,13 +26,20 @@ pub enum Request {
     },
     Hide,
     Quit,
+    /// Scan every application source now and wait for the result.
+    IndexRebuild,
+    IndexStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Response {
     Ok,
-    Error { message: String },
+    Error {
+        message: String,
+    },
+    /// The answer to `index_rebuild` and `index_status`.
+    Index(crate::index::IndexStatus),
 }
 
 /// Where the socket lives.
@@ -265,6 +272,27 @@ mod tests {
             serde_json::from_str::<Request>(r#"{"cmd":"show"}"#).unwrap(),
             Request::Show { query: None }
         );
+    }
+
+    #[test]
+    fn index_requests_and_the_status_answer_round_trip() {
+        assert_eq!(
+            serde_json::to_string(&Request::IndexRebuild).unwrap(),
+            r#"{"cmd":"index_rebuild"}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"cmd":"index_status"}"#).unwrap(),
+            Request::IndexStatus
+        );
+        let status = crate::index::IndexStatus {
+            apps: 3,
+            sources: vec![crate::index::SourceStatus { source: "linux".into(), apps: 3 }],
+            indexing: false,
+            last_indexed: 7,
+        };
+        let json = serde_json::to_string(&Response::Index(status.clone())).unwrap();
+        assert!(json.starts_with(r#"{"status":"index","apps":3"#), "{json}");
+        assert_eq!(serde_json::from_str::<Response>(&json).unwrap(), Response::Index(status));
     }
 
     #[test]

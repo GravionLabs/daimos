@@ -40,8 +40,9 @@ pub fn run() {
             if let Err(error) = tray::install(app.handle()) {
                 log::warn!("no tray icon: {error}");
             }
-            setup_query_engine(app);
+            setup_query_engine(app)?;
             setup_hotkey(app, started)?;
+            start_index_in_background(app);
             ipc_server::start(app.handle());
             Ok(())
         })
@@ -54,22 +55,69 @@ pub fn run() {
         });
 }
 
-/// The engine starts without providers; the application index and the built-ins register in M1.
-fn setup_query_engine(app: &tauri::App) {
+/// Opens the application index and the query engine on top of it. The stored list is loaded here,
+/// before the hotkey is registered, so the first query already has results; the scan that
+/// refreshes it runs in the background afterwards (`start_index_in_background`).
+fn setup_query_engine(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use daimos_core::app_provider::AppsProvider;
+    use daimos_core::frecency::Frecency;
+    use daimos_core::index::{AppIndex, IndexService};
     use tauri_specta::Event;
+
+    let data_dir = app.path().app_data_dir()?;
+    let icon_dir = data_dir.join("icons");
+    let index = Arc::new(IndexService::open(
+        AppIndex::open(&data_dir.join("index.db"))?,
+        app_sources(&icon_dir),
+        Some(icon_dir),
+    )?);
+    log::info!("loaded {} apps from the index", index.apps().len());
+    let frecency = Arc::new(Frecency::open(&data_dir.join("frecency.db"))?);
+
     let handle = app.handle().clone();
     let sink: daimos_core::query::Sink = Arc::new(move |batch| {
         if let Err(error) = bindings::QueryResults(batch).emit(&handle) {
             log::warn!("cannot send results: {error}");
         }
     });
+    let providers: Vec<Arc<dyn daimos_core::Provider>> =
+        vec![Arc::new(AppsProvider::new(Arc::clone(&index), frecency))];
     let runtime = tauri::async_runtime::handle();
-    app.manage(Arc::new(daimos_core::QueryEngine::new(Vec::new(), sink, runtime.inner().clone())));
+    app.manage(Arc::new(daimos_core::QueryEngine::new(providers, sink, runtime.inner().clone())));
+    app.manage(index);
+    Ok(())
+}
+
+/// The application sources of this OS.
+fn app_sources(icon_dir: &std::path::Path) -> Vec<Arc<dyn daimos_core::apps::AppSource>> {
+    #[cfg(target_os = "linux")]
+    {
+        let _ = icon_dir;
+        vec![Arc::new(daimos_platform::apps::linux::LinuxAppSource::new())]
+    }
+    #[cfg(windows)]
+    {
+        vec![Arc::new(daimos_platform::apps::windows::WindowsAppSource::new(icon_dir))]
+    }
+    #[cfg(target_os = "macos")]
+    {
+        vec![Arc::new(daimos_platform::apps::macos::MacAppSource::new(icon_dir))]
+    }
+}
+
+/// Scans in the background and again whenever an application directory changes.
+fn start_index_in_background(app: &tauri::App) {
+    if let Some(index) = app.try_state::<Arc<daimos_core::index::IndexService>>() {
+        index.start_background(daimos_core::index::DEBOUNCE);
+    }
 }
 
 /// Quit from the tray or the CLI: stop the socket listener and give the hotkey back.
 fn shutdown(app: &tauri::AppHandle) {
     ipc_server::stop(app);
+    if let Some(index) = app.try_state::<Arc<daimos_core::index::IndexService>>() {
+        index.stop();
+    }
     if let Some(hotkey) = app.try_state::<Arc<HotkeyService>>() {
         let _ = hotkey.release();
     }
