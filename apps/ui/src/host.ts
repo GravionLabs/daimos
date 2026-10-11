@@ -1,10 +1,14 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
+  type AliasEntry,
+  type Capabilities,
   commands,
   events,
   type Icon,
   type ResultBatch,
+  type SettingsView,
   type ThemeInfo,
+  type ThemeSetting,
   type View,
 } from "./bindings";
 
@@ -32,11 +36,29 @@ export interface Host {
   theme(): Promise<ThemeInfo>;
   /** Calls `callback` when the OS theme or the theme setting changes; returns an unsubscribe function. */
   onTheme(callback: (theme: ThemeInfo) => void): () => void;
+  /** Calls `callback` when the tray asks for the settings page; returns an unsubscribe function. */
+  onOpenSettings(callback: () => void): () => void;
+  settings(): Promise<SettingsView>;
+  capabilities(): Promise<Capabilities>;
+  /** Tries a new hotkey; resolves to the system's error message, or null when it was set. */
+  setHotkey(accelerator: string): Promise<string | null>;
+  setTheme(setting: ThemeSetting): Promise<SettingsView>;
+  setProvider(id: string, enabled: boolean, weight: number | null): Promise<SettingsView>;
+  setAliases(aliases: AliasEntry[]): Promise<SettingsView>;
   /** The URL the web view can load an icon from, or null when there is none (placeholder). */
   iconSrc(icon: Icon): string | null;
   hide(): void;
   /** Tells the shell how many result rows are visible so the window can fit them. */
   resize(rows: number): void;
+}
+
+/** The data of a command result, or its error as an exception. */
+async function unwrap<T>(
+  result: Promise<{ status: "ok"; data: T } | { status: "error"; error: string }>,
+): Promise<T> {
+  const done = await result;
+  if (done.status === "error") throw new Error(done.error);
+  return done.data;
 }
 
 export const tauriHost: Host = {
@@ -57,6 +79,22 @@ export const tauriHost: Host = {
   runAction: (itemId, actionId) => void commands.runAction(itemId, actionId),
   copy: (text) => navigator.clipboard.writeText(text),
   theme: () => commands.theme(),
+  onOpenSettings(callback) {
+    const unlisten = events.openSettings.listen(() => callback());
+    return () => void unlisten.then((fn) => fn());
+  },
+  settings: () => unwrap(commands.settings()),
+  capabilities: () => commands.capabilities(),
+  async setHotkey(accelerator) {
+    const result = await commands.setHotkey(accelerator);
+    return result.status === "ok" ? null : result.error.message;
+  },
+  async setTheme(setting) {
+    await unwrap(commands.setTheme(setting));
+    return unwrap(commands.settings());
+  },
+  setProvider: (id, enabled, weight) => unwrap(commands.setProvider(id, enabled, weight)),
+  setAliases: (aliases) => unwrap(commands.setAliases(aliases)),
   onTheme(callback) {
     const unlisten = events.themeChanged.listen((event) => callback(event.payload));
     return () => void unlisten.then((fn) => fn());

@@ -1,6 +1,7 @@
 //! The Tauri shell: commands, events, tray and window lifecycle on top of `daimos-core`.
 
 pub mod bindings;
+mod capabilities;
 mod ipc_server;
 mod tray;
 mod window_control;
@@ -87,10 +88,17 @@ fn setup_query_engine(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
     let providers: Vec<Arc<dyn daimos_core::Provider>> = vec![
         Arc::new(daimos_core::calc::provider::CalcProvider::new(rates)),
         Arc::new(AppsProvider::new(Arc::clone(&index), Arc::clone(&frecency))),
+        Arc::new(daimos_core::commands::CommandsProvider::new()),
     ];
     app.manage(Arc::new(daimos_core::actions::ActionRunner::new(Arc::clone(&index), frecency)));
     let runtime = tauri::async_runtime::handle();
-    app.manage(Arc::new(daimos_core::QueryEngine::new(providers, sink, runtime.inner().clone())));
+    let engine = Arc::new(daimos_core::QueryEngine::new(providers, sink, runtime.inner().clone()));
+    // What the user switched off or renamed in the settings applies from the first query.
+    match SettingsStore::new(app.path().app_config_dir()?).load() {
+        Ok(settings) => engine.set_config(daimos_core::query::EngineConfig::from(&settings)),
+        Err(error) => log::warn!("settings not applied to the query engine: {error}"),
+    }
+    app.manage(engine);
     app.manage(index);
     Ok(())
 }

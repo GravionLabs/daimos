@@ -311,3 +311,155 @@ kbd {
     animation: none !important;
   }
 }
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.settings {
+  max-height: 468px;
+  overflow-y: auto;
+}
+
+.settings-body {
+  padding: 0 14px 12px;
+}
+
+.settings h3 {
+  margin: 16px 0 6px;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.settings ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.settings input[type="number"],
+.alias-form input {
+  padding: 4px 8px;
+  border: 1px solid var(--selected);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.settings input[type="number"] {
+  width: 5rem;
+}
+
+.settings button {
+  padding: 4px 10px;
+  border: 1px solid var(--selected);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.themes {
+  display: flex;
+  gap: 16px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.providers li,
+.aliases li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 0;
+}
+
+.providers .weight {
+  margin-left: auto;
+}
+
+.alias,
+.target {
+  font-family: ui-monospace, monospace;
+}
+
+.alias-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.alias-form input {
+  flex: 1;
+  min-width: 0;
+}
+
+.hint {
+  margin: 0 0 6px;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.recorder {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.recorder-button {
+  min-width: 10rem;
+  font-family: ui-monospace, monospace;
+}
+
+.recorder-button[data-recording="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.capabilities li {
+  padding: 6px 0;
+}
+
+.capabilities p {
+  margin: 2px 0;
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+.capabilities pre {
+  margin: 4px 0 0;
+  padding: 8px;
+  overflow-x: auto;
+  border-radius: 6px;
+  background: var(--selected);
+  font-size: 0.75rem;
+}
+
+.level {
+  margin-left: 8px;
+  font-size: 0.75rem;
+}
+
+.capabilities li[data-level="available"] .level {
+  color: var(--accent);
+}
+
+.capabilities li[data-level="unavailable"] .level {
+  color: var(--error);
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent);
+}

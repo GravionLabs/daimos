@@ -1,8 +1,46 @@
 import { vi } from "vitest";
-import type { Icon, Item, ResultBatch } from "./bindings";
+import type { Capabilities, Icon, Item, ResultBatch, SettingsView } from "./bindings";
 import type { Host } from "./host";
 
+export function settingsView(extra: Partial<SettingsView> = {}): SettingsView {
+  return {
+    hotkey: "Alt+Space",
+    theme: "system",
+    providers: [
+      { id: "apps", enabled: true, weight: 1, default_weight: 1 },
+      { id: "calc", enabled: true, weight: 10, default_weight: 10 },
+    ],
+    aliases: [{ alias: "ff", target: "Firefox" }],
+    ...extra,
+  };
+}
+
+export function capabilitiesView(): Capabilities {
+  return {
+    session: "x11",
+    window_mode: "toplevel",
+    hotkey: { state: "active", session: "x11", binding: "Alt+Space", message: null },
+    items: [
+      {
+        id: "hotkey",
+        label: "Global hotkey",
+        level: "available",
+        reason: "Registered through XGrabKey.",
+        instructions: null,
+      },
+      {
+        id: "paste",
+        label: "Paste into the previous window",
+        level: "unavailable",
+        reason: "Arrives with M3.",
+        instructions: null,
+      },
+    ],
+  };
+}
+
 export function fakeHost() {
+  let openSettings: (() => void) | undefined;
   let shown: (() => void) | undefined;
   let query: ((query: string) => void) | undefined;
   let results: ((batch: ResultBatch) => void) | undefined;
@@ -31,6 +69,18 @@ export function fakeHost() {
       Promise.resolve({ setting: "system" as const, system: "light", accent: null }),
     ),
     onTheme: vi.fn(() => () => {}),
+    onOpenSettings: vi.fn((callback: () => void) => {
+      openSettings = callback;
+      return () => {
+        openSettings = undefined;
+      };
+    }),
+    settings: vi.fn(() => Promise.resolve(settingsView())),
+    capabilities: vi.fn(() => Promise.resolve(capabilitiesView())),
+    setHotkey: vi.fn(() => Promise.resolve(null)),
+    setTheme: vi.fn(() => Promise.resolve(settingsView())),
+    setProvider: vi.fn(() => Promise.resolve(settingsView())),
+    setAliases: vi.fn(() => Promise.resolve(settingsView())),
     loadView: vi.fn(() => Promise.reject(new Error("no view"))),
     submitForm: vi.fn(() => Promise.resolve()),
     query: vi.fn(),
@@ -44,6 +94,7 @@ export function fakeHost() {
     show: () => shown?.(),
     sendQuery: (text: string) => query?.(text),
     send: (batch: ResultBatch) => results?.(batch),
+    openSettings: () => openSettings?.(),
   };
 }
 
