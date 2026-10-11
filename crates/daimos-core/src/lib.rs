@@ -11,6 +11,7 @@ pub mod frecency;
 pub mod index;
 pub mod ipc;
 pub mod model;
+pub mod paste;
 pub mod provider;
 pub mod query;
 pub mod ranker;

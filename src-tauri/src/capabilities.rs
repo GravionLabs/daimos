@@ -7,6 +7,7 @@ use specta::Type;
 use daimos_platform::hotkey::{Binding, trigger_matches};
 
 use crate::bindings::HotkeyStatus;
+use daimos_core::paste::PasteSupport;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]
 #[serde(rename_all = "lowercase")]
@@ -64,12 +65,7 @@ pub fn bound_status(session: &str, binding: &Binding, reported: Option<String>) 
 /// The capabilities for a session (`x11`, `wayland`, `windows`, `macos`), the window mode
 /// (`layer_shell` or `toplevel`) and the state of the hotkey.
 pub fn capabilities(session: &str, window_mode: &str, hotkey: &HotkeyStatus) -> Vec<Capability> {
-    vec![
-        hotkey_capability(session, hotkey),
-        window_capability(session, window_mode),
-        clipboard(),
-        paste(),
-    ]
+    vec![hotkey_capability(session, hotkey), window_capability(session, window_mode), clipboard()]
 }
 
 fn hotkey_capability(session: &str, hotkey: &HotkeyStatus) -> Capability {
@@ -168,13 +164,25 @@ fn clipboard() -> Capability {
     )
 }
 
-fn paste() -> Capability {
-    capability(
-        "paste",
-        "Paste into the previous window",
-        Level::Unavailable,
-        "Arrives with the clipboard history and snippets (milestone M3).",
-    )
+/// Whether the shortcut that pastes into the previous window can be sent.
+pub fn paste_capability(support: &PasteSupport) -> Capability {
+    match support {
+        PasteSupport::Full => capability(
+            "paste",
+            "Paste into the previous window",
+            Level::Available,
+            "The window you came from gets the paste shortcut.",
+        ),
+        PasteSupport::Limited(reason) => {
+            capability("paste", "Paste into the previous window", Level::Limited, reason.clone())
+        }
+        PasteSupport::Unsupported(reason) => capability(
+            "paste",
+            "Paste into the previous window",
+            Level::Unavailable,
+            format!("{reason}. The text is copied instead."),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -287,9 +295,17 @@ mod tests {
     }
 
     #[test]
-    fn paste_is_unavailable_until_m3_and_copy_works() {
+    fn copy_works_and_paste_follows_the_paster() {
         let all = capabilities("x11", "toplevel", &status("active", None));
-        assert_eq!(find(&all, "paste").level, Level::Unavailable);
         assert_eq!(find(&all, "clipboard").level, Level::Available);
+        assert_eq!(paste_capability(&PasteSupport::Full).level, Level::Available);
+        let limited = paste_capability(&PasteSupport::Limited("grant Accessibility".into()));
+        assert_eq!(
+            (limited.level, limited.reason.as_str()),
+            (Level::Limited, "grant Accessibility")
+        );
+        let none = paste_capability(&PasteSupport::Unsupported("install wtype".into()));
+        assert_eq!(none.level, Level::Unavailable);
+        assert!(none.reason.starts_with("install wtype"));
     }
 }

@@ -5,6 +5,7 @@ import {
   commands,
   events,
   type Icon,
+  type PasteResult,
   type ResultBatch,
   type SettingsView,
   type ThemeInfo,
@@ -48,6 +49,8 @@ export interface Host {
   setProvider(id: string, enabled: boolean, weight: number | null): Promise<SettingsView>;
   setAliases(aliases: AliasEntry[]): Promise<SettingsView>;
   setClipboardHistory(enabled: boolean): Promise<SettingsView>;
+  /** Hides the window and pastes the clipboard into the previous window; `pasted` is false when it could only be copied (the window stays open then). */
+  paste(): Promise<PasteResult>;
   /** The URL the web view can load an icon from, or null when there is none (placeholder). */
   iconSrc(icon: Icon): string | null;
   hide(): void;
@@ -111,6 +114,7 @@ export const tauriHost: Host = {
   setProvider: (id, enabled, weight) => unwrap(commands.setProvider(id, enabled, weight)),
   setAliases: (aliases) => unwrap(commands.setAliases(aliases)),
   setClipboardHistory: (enabled) => unwrap(commands.setClipboardHistory(enabled)),
+  paste: () => unwrap(commands.paste()),
   onTheme(callback) {
     const unlisten = track(events.themeChanged.listen((event) => callback(event.payload)));
     return () => void unlisten.then((fn) => fn());

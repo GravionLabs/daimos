@@ -47,6 +47,12 @@ export const commands = {
 	setAliases: (aliases: AliasEntry[]) => typedError<SettingsView, string>(__TAURI_INVOKE("set_aliases", { aliases })),
 	/**  Switches the clipboard history on or off; it starts and stops following the clipboard at once. */
 	setClipboardHistory: (enabled: boolean) => typedError<SettingsView, string>(__TAURI_INVOKE("set_clipboard_history", { enabled })),
+	/**
+	 *  Pastes what is on the clipboard into the window the user came from: hides the window, waits
+	 *  for that window to take the focus back, sends the paste shortcut. Where that is not possible
+	 *  the window stays open, so the UI can say why the text was only copied.
+	 */
+	paste: () => typedError<PasteResult, string>(__TAURI_INVOKE("paste")),
 };
 
 /** Events */
@@ -160,6 +166,14 @@ export type Level = "available" | "limited" | "unavailable";
 
 /**  The tray item `Settings` was chosen; the UI opens the settings page (M1). */
 export type OpenSettings = null;
+
+/**  What a `paste` request did. */
+export type PasteResult = {
+	/**  The paste shortcut was sent to the previous window. */
+	pasted: boolean,
+	/**  Why the text was only copied. */
+	reason: string | null,
+};
 
 /**  One provider as the settings page shows it. */
 export type ProviderView = {

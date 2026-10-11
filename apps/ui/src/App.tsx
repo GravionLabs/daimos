@@ -137,6 +137,17 @@ export function App(props: { host?: Host }) {
           .then(() => notify("Copied"))
           .catch(() => notify("Could not copy"));
         break;
+      case "paste":
+        // The web view puts the text on the clipboard (it works on every compositor), the shell
+        // sends the shortcut. Where it cannot, the text stays copied and the window says why.
+        host()
+          .copy(action.payload ?? item.title)
+          .then(() => host().paste())
+          .then((result) => {
+            if (!result.pasted) notify(`Copied. ${result.reason ?? "Paste it yourself."}`);
+          })
+          .catch(() => notify("Could not copy"));
+        break;
       case "push":
       case "form":
         if (action.payload === OPEN_SETTINGS) setSettingsOpen(true);

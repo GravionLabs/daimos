@@ -250,3 +250,36 @@ describe("navigation stack", () => {
     expect(screen.getByLabelText("Name")).toBeInTheDocument();
   });
 });
+
+describe("paste", () => {
+  const paste: Action = {
+    id: "paste",
+    title: "Paste",
+    shortcut: "Enter",
+    kind: "paste",
+    payload: "hello",
+  };
+
+  function pasting() {
+    const fake = fakeHost();
+    render(() => <App host={fake.host} />);
+    fake.send(batch(0, [item("a", { actions: [paste] })]));
+    return { ...fake, box: screen.getByRole("searchbox") };
+  }
+
+  it("copies the text, then asks the shell to paste it", async () => {
+    const { host, box } = pasting();
+    fireEvent.keyDown(box, { key: "Enter" });
+    await waitFor(() => expect(host.paste).toHaveBeenCalledOnce());
+    expect(host.copy).toHaveBeenCalledExactlyOnceWith("hello");
+    expect(host.runAction).not.toHaveBeenCalled();
+    expect(screen.queryByText(/^Copied/)).toBeNull();
+  });
+
+  it("says why when it could only copy", async () => {
+    const { host, box } = pasting();
+    vi.mocked(host.paste).mockResolvedValueOnce({ pasted: false, reason: "install wtype" });
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(await screen.findByText("Copied. install wtype")).toBeInTheDocument();
+  });
+});
