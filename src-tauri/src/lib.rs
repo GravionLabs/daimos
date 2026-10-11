@@ -40,6 +40,7 @@ pub fn run() {
             if let Err(error) = tray::install(app.handle()) {
                 log::warn!("no tray icon: {error}");
             }
+            setup_query_engine(app);
             setup_hotkey(app, started)?;
             ipc_server::start(app.handle());
             Ok(())
@@ -51,6 +52,19 @@ pub fn run() {
                 shutdown(app);
             }
         });
+}
+
+/// The engine starts without providers; the application index and the built-ins register in M1.
+fn setup_query_engine(app: &tauri::App) {
+    use tauri_specta::Event;
+    let handle = app.handle().clone();
+    let sink: daimos_core::query::Sink = Arc::new(move |batch| {
+        if let Err(error) = bindings::QueryResults(batch).emit(&handle) {
+            log::warn!("cannot send results: {error}");
+        }
+    });
+    let runtime = tauri::async_runtime::handle();
+    app.manage(Arc::new(daimos_core::QueryEngine::new(Vec::new(), sink, runtime.inner().clone())));
 }
 
 /// Quit from the tray or the CLI: stop the socket listener and give the hotkey back.

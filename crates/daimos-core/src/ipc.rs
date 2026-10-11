@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use interprocess::local_socket::traits::{ListenerExt as _, Stream as _};
 use interprocess::local_socket::{ListenerOptions, Name, Stream};
@@ -167,15 +168,23 @@ impl Server {
     fn shutdown(&mut self) {
         let Some(thread) = self.thread.take() else { return };
         self.stopping.store(true, Ordering::SeqCst);
-        // `accept` blocks, so wake it with a connection that is dropped at once.
-        // The connect runs on its own thread: on some systems it can block, and quitting must not.
-        if let Ok(name) = self.endpoint.name() {
-            std::thread::spawn(move || {
-                let _ = Stream::connect(name);
-            });
+        // `accept` blocks, so wake it with a connection that is dropped at once. The connect runs
+        // on its own thread: on some systems it can block, and quitting must not. A single wake-up
+        // can be lost under load (seen with named pipes on Windows), so it is repeated until the
+        // accept thread reports back or the wait is over.
+        let name = self.endpoint.name().ok();
+        let deadline = std::time::Instant::now() + SHUTDOWN_WAIT;
+        let mut ended = false;
+        while !ended && std::time::Instant::now() < deadline {
+            if let Some(name) = name.clone() {
+                std::thread::spawn(move || {
+                    let _ = Stream::connect(name);
+                });
+            }
+            ended = self.finished.recv_timeout(Duration::from_millis(100)).is_ok();
         }
         // If the accept thread does not end (socket file removed, blocked connect), detach it.
-        if self.finished.recv_timeout(SHUTDOWN_WAIT).is_ok() {
+        if ended {
             let _ = thread.join();
         }
     }

@@ -15,21 +15,46 @@ export const commands = {
 	resizeWindow: (rows: number) => __TAURI_INVOKE<void>("resize_window", { rows }),
 	/**  The UI painted the first frame after a show: logs the time from the hotkey event to now. */
 	firstPaint: () => __TAURI_INVOKE<void>("first_paint"),
+	/**
+	 *  Starts a query for `session` and cancels the session's previous one. The answer streams in
+	 *  as `QueryResults` events.
+	 */
+	query: (session: number, text: string) => __TAURI_INVOKE<void>("query", { session, text }),
 };
 
 /** Events */
 export const events = {
 	hotkeyStatusChanged: makeEvent<HotkeyStatusChanged>("hotkey-status-changed"),
 	openSettings: makeEvent<OpenSettings>("open-settings"),
+	queryResults: makeEvent<QueryResults>("query-results"),
 	querySet: makeEvent<QuerySet>("query-set"),
 	windowShown: makeEvent<WindowShown>("window-shown"),
 };
 
 /* Types */
+export type Action = {
+	id: string,
+	title: string,
+	shortcut: string | null,
+	kind: ActionKind,
+	/**  What the action acts on: a path, text to copy, a command line, or a view to push. */
+	payload: string | null,
+};
+
+export type ActionKind = "open" | "copy" | "paste" | "run" | "push" | "form";
+
 /**  Version of the running application, shown by the UI and logged by the shell. */
 export type AppInfo = {
 	name: string,
 	version: string,
+};
+
+export type Detail = { type: "markdown"; text: string } | { type: "metadata"; entries: ([string, string])[] };
+
+export type FormField = {
+	id: string,
+	label: string,
+	required: boolean,
 };
 
 /**  Why a hotkey could not be set; `binding` is the accelerator that was refused. */
@@ -51,11 +76,41 @@ export type HotkeyStatus = {
 /**  Emitted when the hotkey state changes after start-up (the portal dialog was answered). */
 export type HotkeyStatusChanged = HotkeyStatus;
 
+export type Icon = 
+/**  A themed icon name, for example `firefox`. */
+{ type: "named"; name: string } | { type: "file"; path: string } | { type: "dataUrl"; url: string };
+
+export type Item = {
+	id: string,
+	title: string,
+	subtitle: string | null,
+	icon: Icon | null,
+	keywords: string[],
+	accessories: string[],
+	actions: Action[],
+	detail: Detail | null,
+};
+
 /**  The tray item `Settings` was chosen; the UI opens the settings page (M1). */
 export type OpenSettings = null;
 
+/**  One batch of results for a query session; see `ResultBatch` for the fields. */
+export type QueryResults = ResultBatch;
+
 /**  Text for the search field, sent by `daimos show "text"` right after the window was shown. */
 export type QuerySet = string;
+
+/**  One event for the UI. `seq` increases per query; the last batch of a provider has `done`. */
+export type ResultBatch = {
+	session: number,
+	seq: number,
+	provider: string,
+	items: Item[],
+	done: boolean,
+};
+
+/**  What a provider answers with. Views are data; the webview renders them. */
+export type View = { type: "list"; items: Item[] } | { type: "detail"; detail: Detail } | { type: "form"; fields: FormField[] } | { type: "push"; view_id: string };
 
 /**  Emitted every time the window is shown, so the UI can clear the query without being recreated. */
 export type WindowShown = null;
