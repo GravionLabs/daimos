@@ -24,19 +24,9 @@ pub fn extensions_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| extensions_dir_in(&dir))
 }
 
-/// The Daimos data directory below a base data directory (`~/.local/share`, `%APPDATA%`, ...).
-pub fn data_dir_in(base: &Path) -> PathBuf {
-    base.join("daimos")
-}
-
 /// `<data dir>/logs/<extension>.log`: where the stderr of a script extension goes.
 pub fn log_path_in(data_dir: &Path, extension: &str) -> PathBuf {
     data_dir.join("logs").join(format!("{extension}.log"))
-}
-
-/// The log file of `extension` for the current user, `None` without a data directory.
-pub fn log_path(extension: &str) -> Option<PathBuf> {
-    dirs::data_dir().map(|base| log_path_in(&data_dir_in(&base), extension))
 }
 
 /// An extension that loaded.
@@ -143,11 +133,9 @@ mod tests {
 
     #[test]
     fn the_log_of_an_extension_is_in_the_logs_folder_of_the_data_dir() {
-        let data = data_dir_in(Path::new("base"));
-        assert_eq!(data, Path::new("base").join("daimos"));
         assert_eq!(
-            log_path_in(&data, "notes"),
-            Path::new("base").join("daimos").join("logs").join("notes.log")
+            log_path_in(Path::new("data"), "notes"),
+            Path::new("data").join("logs").join("notes.log")
         );
     }
 

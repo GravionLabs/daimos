@@ -7,6 +7,7 @@ use daimos_core::provider::{Provider, QueryContext};
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 
+use crate::dir::LoadedExtension;
 use crate::manifest::{Command, Manifest};
 
 /// Runs the commands of extensions. The script and wasm hosts implement it in later milestones.
@@ -18,6 +19,12 @@ pub trait Backend: Send + Sync {
         command: &str,
         ctx: QueryContext,
     ) -> BoxStream<'static, ItemBatch>;
+
+    /// Called when an extension has been loaded or reloaded, before its providers are registered.
+    fn load(&self, _extension: &LoadedExtension) {}
+
+    /// Called when the extension called `name` is gone, disabled or about to be reloaded.
+    fn unload(&self, _name: &str) {}
 }
 
 /// Answers every query with nothing, until a runtime host exists.

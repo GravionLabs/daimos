@@ -114,17 +114,25 @@ fn setup_query_engine(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
-/// Loads the extensions and reloads them when their files change. The runtimes that answer queries
-/// are not there yet, so the commands return nothing for now; the list is available to the CLI.
+/// Loads the extensions and reloads them when their files change. Script extensions in one-shot
+/// mode answer queries; wasm and long-running scripts do not yet, so their commands return nothing.
 fn setup_extensions(app: &tauri::App) {
-    use daimos_ext::{ExtensionHost, Registry, StubBackend};
+    use daimos_ext::{ExtensionHost, Registry, ScriptBackend};
 
     let Some(root) = daimos_ext::dir::extensions_dir() else {
         log::warn!("no config directory, extensions are off");
         return;
     };
     let registry = Arc::clone(&*app.state::<Arc<Registry>>());
-    let host = Arc::new(ExtensionHost::new(root, Arc::new(StubBackend), registry));
+    // The stderr of script extensions goes to `<app data dir>/logs/<extension>.log`.
+    let backend = match app.path().app_data_dir() {
+        Ok(data_dir) => ScriptBackend::with_data_dir(data_dir),
+        Err(error) => {
+            log::warn!("no data directory, script extensions are not logged: {error}");
+            ScriptBackend::new()
+        }
+    };
+    let host = Arc::new(ExtensionHost::new(root, Arc::new(backend), registry));
     match host.watch(std::time::Duration::from_millis(250)) {
         Ok(watcher) => {
             app.manage(watcher);

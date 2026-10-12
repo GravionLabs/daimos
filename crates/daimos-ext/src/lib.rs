@@ -18,4 +18,5 @@ pub use provider::{
     Backend, CommandProvider, ErrorProvider, StubBackend, error_item, providers_for,
 };
 pub use registry::{ExtensionRecord, ExtensionState, Registry};
+pub use script::{Failure, OneShot, ScriptBackend};
 pub use watch::{ExtensionHost, ExtensionWatcher};

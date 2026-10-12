@@ -3,9 +3,11 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::RwLock;
 use std::time::Duration;
 
 use daimos_core::model::{self, ItemBatch};
+use daimos_core::provider::QueryContext;
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader, Lines};
@@ -14,8 +16,10 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-use crate::manifest::ScriptRuntime;
+use crate::dir::{self, LoadedExtension};
+use crate::manifest::{Runtime, ScriptRuntime};
 use crate::protocol::{self, Request, Response};
+use crate::provider::Backend;
 
 /// `CREATE_NO_WINDOW`: no console window flashes when the script starts on Windows.
 #[cfg(windows)]
@@ -26,6 +30,9 @@ const STDERR_GRACE: Duration = Duration::from_millis(500);
 
 /// A log file larger than this is moved to `<name>.log.1` before the next run appends to it.
 const LOG_LIMIT: u64 = 1024 * 1024;
+
+/// Queries are debounced: the script starts this long after the last keystroke.
+pub const DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// The id of the one request a one-shot process receives.
 const REQUEST_ID: u64 = 1;
@@ -281,6 +288,86 @@ async fn start(pending: Pending) -> Option<(Step, State)> {
     step(run).await
 }
 
+/// Runs the one-shot script extensions (`runtime = "script"`, `long_running = false`). Queries of
+/// other extensions (wasm, long-running scripts) get no answer until their hosts exist.
+#[derive(Default)]
+pub struct ScriptBackend {
+    /// By extension name.
+    runners: RwLock<BTreeMap<String, OneShot>>,
+    /// Where `logs/<extension>.log` goes; no logging without it.
+    data_dir: Option<PathBuf>,
+}
+
+impl ScriptBackend {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// A backend that writes the stderr of scripts to `<data_dir>/logs/<extension>.log`.
+    pub fn with_data_dir(data_dir: PathBuf) -> Self {
+        Self { data_dir: Some(data_dir), ..Self::default() }
+    }
+
+    fn runner(&self, extension: &str) -> Option<OneShot> {
+        self.runners.read().unwrap_or_else(|e| e.into_inner()).get(extension).cloned()
+    }
+}
+
+impl Backend for ScriptBackend {
+    fn query(
+        &self,
+        extension: &str,
+        command: &str,
+        ctx: QueryContext,
+    ) -> BoxStream<'static, ItemBatch> {
+        let Some(runner) = self.runner(extension) else {
+            return stream::empty().boxed();
+        };
+        let command = command.to_owned();
+        let QueryContext { text, cancel, .. } = ctx;
+        // A newer keystroke cancels this query during the delay, so no process starts for it.
+        let wait = {
+            let cancel = cancel.clone();
+            async move {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => false,
+                    () = tokio::time::sleep(DEBOUNCE) => true,
+                }
+            }
+        };
+        stream::once(wait)
+            .flat_map(move |go| {
+                if go {
+                    runner.query_batches(&command, &text, BTreeMap::new(), cancel.clone())
+                } else {
+                    stream::empty().boxed()
+                }
+            })
+            .boxed()
+    }
+
+    fn load(&self, extension: &LoadedExtension) {
+        let manifest = &extension.manifest;
+        let name = &manifest.extension.name;
+        let mut runners = self.runners.write().unwrap_or_else(|e| e.into_inner());
+        runners.remove(name);
+        let script = match (&manifest.runtime.script, manifest.extension.runtime) {
+            (Some(script), Runtime::Script) if !script.long_running => script,
+            _ => return,
+        };
+        let mut runner = OneShot::new(name, extension.dir.clone(), script);
+        if let Some(data_dir) = &self.data_dir {
+            runner = runner.with_log(dir::log_path_in(data_dir, name));
+        }
+        runners.insert(name.clone(), runner);
+    }
+
+    fn unload(&self, name: &str) {
+        self.runners.write().unwrap_or_else(|e| e.into_inner()).remove(name);
+    }
+}
+
 /// The error item of a failed run.
 pub fn failure_item(extension: &str, failure: &Failure) -> model::Item {
     let title = match failure {
@@ -446,6 +533,7 @@ pub(crate) mod testutil {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Instant as StdInstant;
 
     use super::testutil::{python, write_script};
@@ -814,5 +902,148 @@ mod tests {
         assert_eq!(exit(Some(2), None).message(), "exited with code 2");
         assert_eq!(exit(None, None).message(), "was stopped before it finished");
         assert_eq!(Failure::Spawn("no".into()).message(), "no");
+    }
+
+    /// An extension directory with `main.py` and a manifest; returns the loaded extension.
+    fn install(root: &Path, python: &str, long_running: bool, source: &str) -> LoadedExtension {
+        let dir = root.join("demo");
+        std::fs::create_dir_all(&dir).unwrap();
+        write_script(&dir, source);
+        let manifest = format!(
+            "[extension]\nname = \"demo\"\ntitle = \"Demo\"\nversion = \"1.0.0\"\n\
+             runtime = \"script\"\n\n[[commands]]\nname = \"search\"\ntitle = \"Search\"\n\
+             keywords = [\"d\"]\n\n[runtime.script]\ncommand = [{python:?}, \"main.py\"]\n\
+             long_running = {long_running}\n"
+        );
+        std::fs::write(dir.join("extension.toml"), manifest).unwrap();
+        dir::load_extension(&dir).unwrap()
+    }
+
+    fn query_of(
+        backend: &ScriptBackend,
+        text: &str,
+        cancel: &CancellationToken,
+    ) -> BoxStream<'static, ItemBatch> {
+        let ctx = QueryContext { text: text.into(), keyword_routed: true, cancel: cancel.clone() };
+        backend.query("demo", "search", ctx)
+    }
+
+    /// Counts runs by appending a line to `runs` and answers with the text.
+    fn counting_script() -> String {
+        format!(
+            "{PRELUDE}open('runs', 'a').write('x\\n')\n\
+             send({{'id': request['id'], 'type': 'items', 'done': True, \
+             'items': [{{'id': 't', 'title': request['text']}}]}})\n"
+        )
+    }
+
+    fn runs(dir: &Path) -> usize {
+        std::fs::read_to_string(dir.join("demo").join("runs"))
+            .map_or(0, |text| text.lines().count())
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queries_cancelled_during_the_debounce_never_start_a_process() {
+        let python = python_or_skip!();
+        let root = tempfile::tempdir().unwrap();
+        let backend = ScriptBackend::new();
+        backend.load(&install(root.path(), python, false, &counting_script()));
+        let mut handles = Vec::new();
+        for text in ["a", "ab", "abc"] {
+            let cancel = CancellationToken::new();
+            let stream = query_of(&backend, text, &cancel);
+            handles.push(tokio::spawn(async move { stream.collect::<Vec<_>>().await }));
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            // The next keystroke replaces this query.
+            cancel.cancel();
+        }
+        for handle in handles {
+            assert!(handle.await.unwrap().is_empty());
+        }
+        assert_eq!(runs(root.path()), 0);
+    }
+
+    #[tokio::test]
+    async fn rapid_keystrokes_spawn_at_most_one_process() {
+        let python = python_or_skip!();
+        let root = tempfile::tempdir().unwrap();
+        let backend = ScriptBackend::new();
+        backend.load(&install(root.path(), python, false, &counting_script()));
+        let mut previous: Option<CancellationToken> = None;
+        let mut handles = Vec::new();
+        for text in ["a", "ab", "abc", "abcd"] {
+            if let Some(cancel) = previous.take() {
+                cancel.cancel();
+            }
+            let cancel = CancellationToken::new();
+            let stream = query_of(&backend, text, &cancel);
+            handles.push(tokio::spawn(async move { stream.collect::<Vec<_>>().await }));
+            previous = Some(cancel);
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+        let mut answered = Vec::new();
+        for handle in handles {
+            answered.extend(handle.await.unwrap());
+        }
+        assert_eq!(runs(root.path()), 1);
+        let [batch] = answered.as_slice() else { panic!("{answered:?}") };
+        assert_eq!(batch.items[0].title, "abcd");
+    }
+
+    #[tokio::test]
+    async fn script_items_appear_through_the_command_provider() {
+        let python = python_or_skip!();
+        let root = tempfile::tempdir().unwrap();
+        install(root.path(), python, false, &counting_script());
+        let registry = Arc::new(crate::registry::Registry::new());
+        let host = crate::watch::ExtensionHost::new(
+            root.path().to_path_buf(),
+            Arc::new(ScriptBackend::new()),
+            Arc::clone(&registry),
+        );
+        host.reload_all();
+        let providers = registry.providers();
+        assert_eq!(providers[0].id(), "demo.search");
+        let batches: Vec<_> = providers[0]
+            .query(QueryContext {
+                text: "hi".into(),
+                keyword_routed: true,
+                cancel: CancellationToken::new(),
+            })
+            .collect()
+            .await;
+        let [batch] = batches.as_slice() else { panic!("{batches:?}") };
+        assert_eq!(batch.items[0].title, "hi");
+        assert_eq!(batch.items[0].accessories, ["Demo"], "labeled with the extension title");
+    }
+
+    #[tokio::test]
+    async fn long_running_unknown_and_unloaded_extensions_are_unaffected() {
+        let python = python_or_skip!();
+        let root = tempfile::tempdir().unwrap();
+        let backend = ScriptBackend::new();
+        let cancel = CancellationToken::new();
+        // Never loaded.
+        assert!(query_of(&backend, "x", &cancel).collect::<Vec<_>>().await.is_empty());
+        // Long-running: stays a stub until its own host exists.
+        backend.load(&install(root.path(), python, true, &counting_script()));
+        assert!(query_of(&backend, "x", &cancel).collect::<Vec<_>>().await.is_empty());
+        // One-shot, then unloaded again.
+        backend.load(&install(root.path(), python, false, &counting_script()));
+        assert_eq!(query_of(&backend, "x", &cancel).collect::<Vec<_>>().await.len(), 1);
+        backend.unload("demo");
+        assert!(query_of(&backend, "x", &cancel).collect::<Vec<_>>().await.is_empty());
+        assert_eq!(runs(root.path()), 1);
+    }
+
+    #[test]
+    fn the_stderr_log_goes_below_the_data_dir() {
+        let backend = ScriptBackend::with_data_dir(PathBuf::from("data"));
+        let root = tempfile::tempdir().unwrap();
+        // The manifest need not run for this: only the loaded runner is looked at.
+        backend.load(&install(root.path(), "python3", false, ""));
+        let log = backend.runner("demo").unwrap().log;
+        assert_eq!(log, Some(Path::new("data").join("logs").join("demo.log")));
+        assert_eq!(ScriptBackend::new().runner("demo").map(|r| r.log), None);
     }
 }
