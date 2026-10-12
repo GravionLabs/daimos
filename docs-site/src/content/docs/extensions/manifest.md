@@ -71,6 +71,7 @@ Only the table that matches `runtime` is used.
 | ------------------ | -------------- | --------------------------------------------------------- |
 | `[runtime.script]` | `command`      | The program and its arguments, run in the extension folder |
 | `[runtime.script]` | `long_running` | Keep the process alive between queries (default `false`)  |
+| `[runtime.script]` | `timeout_ms`   | Milliseconds a query or action may take before the process is killed (default `5000`, must be greater than 0) |
 | `[runtime.wasm]`   | `component`    | Path of the WebAssembly component                         |
 
 ## `[capabilities]`
@@ -128,7 +129,7 @@ The rules:
 - `extension.title` and `extension.version` are not empty; so are command and preference titles.
 - `runtime` is `script` or `wasm`, and the matching `[runtime.script]` or `[runtime.wasm]` table
   exists. The table of the other runtime is an error.
-- `[runtime.script]` has a `command` that names a program; `[runtime.wasm]` has a `component`.
+- `[runtime.script]` has a `command` that names a program, and its `timeout_ms` is greater than 0; `[runtime.wasm]` has a `component`.
 - There is at least one `[[commands]]` entry, and command names are unique.
 - A command `mode` is `view` or `no-view`.
 - Keywords are not empty and contain no spaces.
