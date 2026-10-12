@@ -429,3 +429,164 @@ async fn a_request_in_flight_keeps_the_process_alive() {
     assert_eq!(ext.titles("slow").await, ["slow answer"]);
     assert_eq!(ext.starts(), 1);
 }
+
+mod backend {
+    use std::sync::Arc;
+
+    use daimos_core::model::ItemBatch;
+    use daimos_core::provider::QueryContext;
+    use daimos_ext::{Backend, ExtensionHost, Registry, ScriptBackend};
+
+    use super::*;
+
+    /// A directory of extensions with the fixture installed as `echo`, loaded by a host that
+    /// drives a `ScriptBackend`.
+    struct Host {
+        root: tempfile::TempDir,
+        backend: Arc<ScriptBackend>,
+        host: ExtensionHost,
+    }
+
+    impl Host {
+        fn dir(&self) -> PathBuf {
+            self.root.path().join("echo")
+        }
+
+        fn read(&self, name: &str) -> String {
+            std::fs::read_to_string(self.dir().join(name)).unwrap_or_default()
+        }
+
+        fn starts(&self) -> usize {
+            self.read("runs.log").lines().count()
+        }
+
+        fn manifest(python: &str, keyword: &str, long_running: bool) -> String {
+            format!(
+                "[extension]\nname = \"echo\"\ntitle = \"Echo\"\nversion = \"1.0.0\"\nruntime = \"script\"\n\n\
+                 [[commands]]\nname = \"search\"\ntitle = \"Search\"\nkeywords = [\"{keyword}\"]\n\n\
+                 [runtime.script]\ncommand = [{python:?}, \"echo.py\", \"loop\"]\nlong_running = {long_running}\n"
+            )
+        }
+
+        fn rewrite(&self, python: &str, keyword: &str) {
+            std::fs::write(
+                self.dir().join("extension.toml"),
+                Self::manifest(python, keyword, true),
+            )
+            .unwrap();
+            self.host.reload("echo");
+        }
+
+        async fn titles(&self, text: &str) -> Vec<String> {
+            let ctx = QueryContext {
+                text: text.into(),
+                keyword_routed: true,
+                cancel: CancellationToken::new(),
+            };
+            let batches: Vec<ItemBatch> = self.backend.query("echo", "search", ctx).collect().await;
+            batches
+                .iter()
+                .flat_map(|batch| batch.items.iter().map(|item| item.title.clone()))
+                .collect()
+        }
+    }
+
+    fn host(python: &str) -> Host {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("echo");
+        std::fs::create_dir_all(&dir).unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/echo.py");
+        std::fs::copy(fixture, dir.join("echo.py")).unwrap();
+        std::fs::write(dir.join("extension.toml"), Host::manifest(python, "e", true)).unwrap();
+        // The empty set of capabilities is confirmed, so the extension may run.
+        std::fs::write(dir.join(".consent.json"), r#"{"version":"1.0.0","capabilities":{}}"#)
+            .unwrap();
+        let backend = Arc::new(ScriptBackend::with_data_dir(root.path().join("data")));
+        let host = ExtensionHost::new(
+            root.path().to_path_buf(),
+            backend.clone() as Arc<dyn Backend>,
+            Arc::new(Registry::new()),
+        );
+        host.reload_all();
+        Host { root, backend, host }
+    }
+
+    #[tokio::test]
+    async fn a_long_running_extension_loads_and_answers_queries_and_custom_actions() {
+        let python = python_or_skip!();
+        let host = host(python);
+        assert_eq!(host.titles("a").await, ["echo a", "again a", "last a"]);
+        assert_eq!(host.titles("b").await, ["echo b", "again b", "last b"]);
+        assert_eq!(
+            host.backend.custom_action("echo", "search", "item-7", "star"),
+            Ok(Some("Starred item-7".to_owned()))
+        );
+        assert_eq!(host.starts(), 1, "queries and the action share one process");
+    }
+
+    #[tokio::test]
+    async fn a_long_running_query_is_not_debounced() {
+        let python = python_or_skip!();
+        let host = host(python);
+        assert_eq!(host.titles("warm").await.len(), 3);
+        let started = Instant::now();
+        assert_eq!(host.titles("again").await.len(), 3);
+        // A warm query is far below the 150 ms that one-shot queries wait.
+        assert!(started.elapsed() < Duration::from_millis(140), "{:?}", started.elapsed());
+    }
+
+    #[tokio::test]
+    async fn unload_kills_the_process() {
+        let python = python_or_skip!();
+        let host = host(python);
+        assert_eq!(host.titles("a").await.len(), 3);
+        let pid = host.read("pid.txt");
+        host.backend.unload("echo");
+        if cfg!(unix) {
+            eventually("the process to end", || !process_exists(&pid)).await;
+        }
+        assert!(host.titles("b").await.is_empty(), "an unloaded extension gets no answer");
+        assert_eq!(host.starts(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_manifest_edit_restarts_the_process() {
+        let python = python_or_skip!();
+        let host = host(python);
+        assert_eq!(host.titles("a").await.len(), 3);
+        let pid = host.read("pid.txt");
+        host.rewrite(python, "changed");
+        if cfg!(unix) {
+            eventually("the old process to end", || !process_exists(&pid)).await;
+        }
+        assert_eq!(host.titles("b").await.len(), 3);
+        assert_eq!(host.starts(), 2);
+        assert_ne!(host.read("pid.txt"), pid);
+    }
+
+    #[tokio::test]
+    async fn a_reload_clears_the_failed_state() {
+        let python = python_or_skip!();
+        let host = host(python);
+        // The default policy: the fourth crash in a minute fails the session.
+        for _ in 0..4 {
+            let _ = host.titles("crash").await;
+        }
+        let failed = host.titles("ok").await;
+        assert_eq!(failed, ["echo keeps crashing"]);
+        host.rewrite(python, "e");
+        assert_eq!(host.titles("ok").await.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn one_shot_extensions_still_run_one_process_per_query() {
+        let python = python_or_skip!();
+        let host = host(python);
+        let one_shot = Host::manifest(python, "e", false).replace(", \"loop\"", "");
+        std::fs::write(host.dir().join("extension.toml"), one_shot).unwrap();
+        host.host.reload("echo");
+        assert_eq!(host.titles("a").await, ["echo a", "again a", "last a"]);
+        assert_eq!(host.titles("b").await, ["echo b", "again b", "last b"]);
+        assert_eq!(host.read("runs.log").lines().collect::<Vec<_>>(), ["query", "query"]);
+    }
+}

@@ -3,8 +3,8 @@
 //! The process starts at the first request and stays alive. Every request carries an id from one
 //! counter per session; a reader task routes each response to the request that waits for it, so
 //! interleaved answers reach the right query. A query that is superseded sends `cancel` and its
-//! late answers are dropped. The tasks of a process run on a tokio runtime that outlives the
-//! requests (see [`Session::bind_current`]).
+//! late answers are dropped. The tasks of a process run on a thread of the session, so a request
+//! can be made from any runtime or, as a blocking call, from a thread that has none.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
@@ -328,14 +328,14 @@ async fn supervise(
     let _ = exit.send(Some(Exit { code }));
 }
 
-/// A background runtime for sessions that are first used outside any runtime of the app.
-struct Fallback {
+/// The thread and runtime that run the tasks of the processes of one session.
+struct HostThread {
     handle: Handle,
     /// Dropping the sender ends the thread and with it the runtime and its processes.
     _stop: tokio::sync::oneshot::Sender<()>,
 }
 
-fn fallback() -> std::io::Result<Fallback> {
+fn host_thread() -> std::io::Result<HostThread> {
     let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
     let handle = runtime.handle().clone();
     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -344,7 +344,7 @@ fn fallback() -> std::io::Result<Fallback> {
             let _ = stopped.await;
         });
     })?;
-    Ok(Fallback { handle, _stop: stop })
+    Ok(HostThread { handle, _stop: stop })
 }
 
 struct Inner {
@@ -358,8 +358,7 @@ struct Inner {
     gate: tokio::sync::Mutex<()>,
     current: Mutex<Option<Arc<Proc>>>,
     closed: AtomicBool,
-    bound: Mutex<Option<Handle>>,
-    fallback: OnceLock<Option<Fallback>>,
+    host: OnceLock<Option<HostThread>>,
 }
 
 impl Drop for Inner {
@@ -405,10 +404,14 @@ impl Session {
                 gate: tokio::sync::Mutex::new(()),
                 current: Mutex::new(None),
                 closed: AtomicBool::new(false),
-                bound: Mutex::new(None),
-                fallback: OnceLock::new(),
+                host: OnceLock::new(),
             }),
         }
+    }
+
+    /// The name of the extension.
+    pub fn extension(&self) -> &str {
+        self.inner.spec.extension()
     }
 
     /// Appends the stderr of the process to `path` (`<data dir>/logs/<extension>.log`).
@@ -427,16 +430,6 @@ impl Session {
         Self::from_spec(OneShot::clone(&self.inner.spec), policy, self.inner.idle)
     }
 
-    /// Runs the tasks of the process on the runtime the caller is in. Queries do this on their
-    /// first poll; a session that is only used through [`action`](Self::action) runs on a
-    /// background thread of its own.
-    pub fn bind_current(&self) {
-        let mut bound = lock(&self.inner.bound);
-        if bound.is_none() {
-            *bound = Handle::try_current().ok();
-        }
-    }
-
     /// Stops the process and makes every later request end without an answer.
     pub fn shutdown(&self) {
         self.inner.closed.store(true, Ordering::SeqCst);
@@ -446,18 +439,15 @@ impl Session {
     }
 
     fn handle(&self) -> Result<Handle, Failure> {
-        if let Some(handle) = lock(&self.inner.bound).clone() {
-            return Ok(handle);
-        }
         self.inner
-            .fallback
+            .host
             .get_or_init(|| {
-                fallback()
+                host_thread()
                     .map_err(|error| log::warn!("cannot start the script thread: {error}"))
                     .ok()
             })
             .as_ref()
-            .map(|fallback| fallback.handle.clone())
+            .map(|host| host.handle.clone())
             .ok_or_else(|| Failure::Spawn("cannot start the script thread".to_owned()))
     }
 
@@ -712,7 +702,6 @@ async fn advance(state: QueryState) -> Option<(Event, QueryState)> {
 }
 
 async fn begin(start: QueryStart) -> Option<(Event, QueryState)> {
-    start.session.bind_current();
     let QueryStart { session, command, text, preferences, cancel } = start;
     let make = |id| Request::Query { id, command, text, preferences };
     match session.open(make, &cancel).await {
