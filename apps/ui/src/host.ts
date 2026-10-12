@@ -3,6 +3,7 @@ import {
   type AliasEntry,
   type Capabilities,
   commands,
+  type ExtensionList_Serialize as ExtensionList,
   events,
   type Icon,
   type PasteResult,
@@ -45,6 +46,14 @@ export interface Host {
   onOpenSettings(callback: () => void): () => void;
   settings(): Promise<SettingsView>;
   capabilities(): Promise<Capabilities>;
+  /** The extensions with state, sandbox label, capabilities and preferences (never a password). */
+  extensions(): Promise<ExtensionList>;
+  /** Confirms the capabilities an extension declares now; it is enabled afterwards. */
+  confirmExtension(name: string): Promise<void>;
+  /** Stores a preference of an extension; a password goes to the OS keyring. */
+  setPreference(name: string, key: string, value: string): Promise<void>;
+  /** Removes the value of a preference of an extension. */
+  clearPreference(name: string, key: string): Promise<void>;
   /** Tries a new hotkey; resolves to the system's error message, or null when it was set. */
   setHotkey(accelerator: string): Promise<string | null>;
   setTheme(setting: ThemeSetting): Promise<SettingsView>;
@@ -105,6 +114,11 @@ export const tauriHost: Host = {
   },
   settings: () => unwrap(commands.settings()),
   capabilities: () => commands.capabilities(),
+  extensions: () => unwrap(commands.extensions()),
+  confirmExtension: (name) => unwrap(commands.confirmExtension(name)).then(() => undefined),
+  setPreference: (name, key, value) =>
+    unwrap(commands.setPreference(name, key, value)).then(() => undefined),
+  clearPreference: (name, key) => unwrap(commands.clearPreference(name, key)).then(() => undefined),
   async setHotkey(accelerator) {
     const result = await commands.setHotkey(accelerator);
     return result.status === "ok" ? null : result.error.message;

@@ -1,5 +1,6 @@
 import { createSignal, For, onMount, Show } from "solid-js";
 import type { Capabilities, Level, SettingsView as Settings, ThemeSetting } from "./bindings";
+import { ExtensionsSection } from "./ExtensionsSection";
 import { HotkeyRecorder } from "./HotkeyRecorder";
 import type { Host } from "./host";
 
@@ -199,6 +200,8 @@ export function SettingsView(props: { host: Host; onClose: () => void }) {
                 {current().clipboard.reason}
               </p>
             </Show>
+
+            <ExtensionsSection host={props.host} />
 
             <h3>Platform</h3>
             <ul class="capabilities">

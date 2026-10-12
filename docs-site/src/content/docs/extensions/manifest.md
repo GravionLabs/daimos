@@ -99,6 +99,18 @@ wider mode (`:rw` where you confirmed `:ro`; a path without a suffix counts as `
 clipboard access, and a new keyring entry. A new version that only removes capabilities keeps
 running, and so does an edit that changes nothing in `[capabilities]`.
 
+### In the settings
+
+The **Extensions** section of the settings lists every extension with its version, its state, and
+a label for its runtime: `Runs unsandboxed` for a script extension, `Sandboxed` for a wasm
+extension. Under each one you see the capabilities it declares, one per line (files with read only
+or read and write, network hosts, clipboard access, keyring entries).
+
+An extension that needs a confirmation shows a **Confirm** button. After an update, the
+capabilities that are new compared with what you confirmed are marked `(new)`. Nothing runs until
+you press the button; it does the same as `daimos ext confirm`, see
+[extension commands](../cli/#confirm-an-update).
+
 ## `[[preferences]]`
 
 Settings you fill in for the extension.
@@ -125,6 +137,11 @@ service `daimos` and the user `<extension name>/<preference name>` (for example
 
 A required preference without a value stops the extension from running: its result names the
 missing preference.
+
+The settings page shows the preferences of each extension as a form under its capabilities:
+text and number fields, a checkbox, and for a password a masked field that stays empty and only
+says `Set` or `Not set`. Required preferences are marked `(required)`. Type a new password and
+press **Save** to replace it, or **Clear** to remove it.
 
 ## How commands and keywords route queries
 
