@@ -96,6 +96,38 @@ Settings you fill in for the extension.
 | `type`     | yes      | `text`, `password` (kept in the OS keyring), `number`, or `checkbox` |
 | `required` | no       | The extension cannot run until it is set (default `false`)           |
 
+## Validation
+
+Daimos checks the manifest when it loads the extension. An extension with a problem is disabled and
+the message names the file, the line, and the field:
+
+```text
+extension.toml:9: commands[0].name: `Search/All` is not a safe name: use lowercase letters, digits, `-` and `_`
+```
+
+The rules:
+
+- `extension.name`, every command `name`, and every preference `name` are identifiers: lowercase
+  letters, digits, `-` and `_`, starting with a letter or digit, at most 64 characters.
+- `extension.title` and `extension.version` are not empty; so are command and preference titles.
+- `runtime` is `script` or `wasm`, and the matching `[runtime.script]` or `[runtime.wasm]` table
+  exists. The table of the other runtime is an error.
+- `[runtime.script]` has a `command` that names a program; `[runtime.wasm]` has a `component`.
+- There is at least one `[[commands]]` entry, and command names are unique.
+- A command `mode` is `view` or `no-view`.
+- Keywords are not empty and contain no spaces.
+- Preference names are unique, and `type` is one of the types above.
+- Unknown fields are errors.
+
+More examples of messages:
+
+```text
+extension.toml:6: extension.runtime: runtime is "wasm" but there is no [runtime.wasm] table
+extension.toml:18: commands[1].name: command `search` is defined twice
+extension.toml:11: commands[0].mode: unknown variant `popup`, expected `view` or `no-view`
+extension.toml:2: extension.title: missing field `title`
+```
+
 ## Platform notes
 
 The manifest is the same on X11, Wayland (KDE and GNOME), Windows, and macOS. Paths in `command`
