@@ -32,6 +32,11 @@ toplevel on every Wayland compositor.
 The Rust crates embed `apps/ui/dist`, so build the UI once (`pnpm --filter @daimos/ui build`) before
 a release build of `src-tauri`; `cargo clippy` and `cargo test` work without it.
 
+## Agent skills
+
+Run `apm install` before working in the repo: it installs the stack skills listed in `apm.yml`. The
+skill folders are git-ignored, so a fresh clone has none. This needs [apm](https://github.com/microsoft/apm).
+
 ## Verify
 
 ```sh
