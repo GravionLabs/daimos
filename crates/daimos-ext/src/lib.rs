@@ -1,5 +1,6 @@
 //! Extension host: manifest parsing, script host, wasm host and capability checks (milestone M2).
 
+pub mod builtin;
 pub mod dir;
 pub mod error;
 pub mod manifest;

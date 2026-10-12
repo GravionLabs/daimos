@@ -331,6 +331,13 @@ describe("shortcuts of actions and refreshing after a change", () => {
     expect(host.runAction).not.toHaveBeenCalled();
   });
 
+  it("shows the message an action answers with as a toast", async () => {
+    const { host, box } = list();
+    vi.mocked(host.runAction).mockResolvedValueOnce("Starred");
+    fireEvent.keyDown(box, { key: "p", ctrlKey: true });
+    expect(await screen.findByText("Starred")).toBeInTheDocument();
+  });
+
   it("shows a failed action as a toast", async () => {
     const { host, box } = list();
     vi.mocked(host.runAction).mockRejectedValueOnce("no action pin");

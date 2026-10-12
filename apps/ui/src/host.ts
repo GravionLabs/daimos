@@ -29,7 +29,8 @@ export interface Host {
   onResults(callback: (batch: ResultBatch) => void): () => void;
   /** Runs an action of a result (the window hides when it succeeded). */
   /** Runs an action; resolves when it ran, rejects with the reason when it failed. */
-  runAction(itemId: string, actionId: string): Promise<void>;
+  /** Runs an action; resolves with the message an extension wants to show, if any. */
+  runAction(itemId: string, actionId: string): Promise<string | null>;
   /** Puts text on the clipboard. */
   copy(text: string): Promise<void>;
   /** The view a `push` or `form` action of a result of `provider` points to. */
@@ -95,9 +96,7 @@ export const tauriHost: Host = {
     const unlisten = track(events.queryResults.listen((event) => callback(event.payload)));
     return () => void unlisten.then((fn) => fn());
   },
-  runAction: async (itemId, actionId) => {
-    await unwrap(commands.runAction(itemId, actionId));
-  },
+  runAction: (itemId, actionId) => unwrap(commands.runAction(itemId, actionId)),
   copy: (text) => navigator.clipboard.writeText(text),
   theme: () => commands.theme(),
   onOpenSettings(callback) {

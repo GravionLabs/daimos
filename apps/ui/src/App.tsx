@@ -190,7 +190,10 @@ export function App(props: { host?: Host }) {
         // Whatever the action changed (a pin, a deletion) shows in the list afterwards.
         host()
           .runAction(item.id, action.id)
-          .then(refresh)
+          .then((toast) => {
+            if (toast) notify(toast);
+            return refresh();
+          })
           .catch((error) => notify(error instanceof Error ? error.message : String(error)));
     }
   };

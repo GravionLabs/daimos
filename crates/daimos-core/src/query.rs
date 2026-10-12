@@ -167,8 +167,8 @@ impl QueryEngine {
         &self,
         item_id: &str,
         action_id: &str,
-    ) -> Option<Result<crate::provider::ActionEffect, String>> {
-        self.all_providers().iter().find_map(|p| p.run_action(item_id, action_id))
+    ) -> Option<Result<crate::provider::ActionOutcome, String>> {
+        self.all_providers().iter().find_map(|p| p.run_action_outcome(item_id, action_id))
     }
 
     /// Hands the values of a submitted form to its provider.

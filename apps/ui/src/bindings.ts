@@ -28,9 +28,11 @@ export const commands = {
 	query: (session: number, text: string) => __TAURI_INVOKE<void>("query", { session, text }),
 	/**
 	 *  Runs an action of a result (`Enter` runs `open`). The window hides after a successful start,
-	 *  so the application that was launched can take the focus.
+	 *  so the application that was launched can take the focus. Answers with the message an extension
+	 *  action wants to show, if any. An extension action can take a while, so it runs off the main
+	 *  thread.
 	 */
-	runAction: (itemId: string, actionId: string) => typedError<null, string>(__TAURI_INVOKE("run_action", { itemId, actionId })),
+	runAction: (itemId: string, actionId: string) => typedError<string | null, string>(__TAURI_INVOKE("run_action", { itemId, actionId })),
 	/**  The view a `push` or `form` action of a result of `provider` points to. */
 	loadView: (provider: string, viewId: string) => typedError<View, string>(__TAURI_INVOKE("load_view", { provider, viewId })),
 	/**  Hands the values of a submitted form to its provider. */

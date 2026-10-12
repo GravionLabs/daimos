@@ -1,12 +1,14 @@
 //! A manifest command as a [`Provider`].
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
-use daimos_core::model::{Item, ItemBatch};
-use daimos_core::provider::{Provider, QueryContext};
+use daimos_core::model::{Action, ActionKind, Item, ItemBatch};
+use daimos_core::provider::{ActionEffect, ActionOutcome, Provider, QueryContext};
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 
+use crate::builtin::{Opener, SystemOpener};
 use crate::dir::LoadedExtension;
 use crate::manifest::{Command, Manifest};
 
@@ -19,6 +21,18 @@ pub trait Backend: Send + Sync {
         command: &str,
         ctx: QueryContext,
     ) -> BoxStream<'static, ItemBatch>;
+
+    /// Runs `action` of `item` when it is not a built-in kind; the answer is the toast to show, if
+    /// any. May block until the extension answers or its timeout ends. The default cannot.
+    fn custom_action(
+        &self,
+        _extension: &str,
+        _command: &str,
+        _item: &str,
+        _action: &str,
+    ) -> Result<Option<String>, String> {
+        Err("this extension cannot run custom actions yet".into())
+    }
 
     /// Called when an extension has been loaded or reloaded, before its providers are registered.
     fn load(&self, _extension: &LoadedExtension) {}
@@ -46,7 +60,13 @@ pub struct CommandProvider {
     command: String,
     keywords: Vec<String>,
     backend: Arc<dyn Backend>,
+    opener: Arc<dyn Opener>,
+    /// The actions of the items this command answered with, by item id.
+    known: Arc<Mutex<HashMap<String, Vec<Action>>>>,
 }
+
+/// Items remembered for their actions; the oldest are dropped wholesale beyond this.
+const KNOWN_LIMIT: usize = 2000;
 
 impl CommandProvider {
     pub fn new(manifest: &Manifest, command: &Command, backend: Arc<dyn Backend>) -> Self {
@@ -57,7 +77,16 @@ impl CommandProvider {
             command: command.name.clone(),
             keywords: command.keywords.clone(),
             backend,
+            opener: Arc::new(SystemOpener),
+            known: Arc::default(),
         }
+    }
+
+    /// Replaces the opener that runs the built-in `open` and `run` actions.
+    #[must_use]
+    pub fn with_opener(mut self, opener: Arc<dyn Opener>) -> Self {
+        self.opener = opener;
+        self
     }
 }
 
@@ -76,9 +105,19 @@ impl Provider for CommandProvider {
 
     fn query(&self, ctx: QueryContext) -> BoxStream<'static, ItemBatch> {
         let label = self.label.clone();
+        let known = Arc::clone(&self.known);
         self.backend
             .query(&self.extension, &self.command, ctx)
             .map(move |mut batch| {
+                {
+                    let mut known = known.lock().unwrap_or_else(|e| e.into_inner());
+                    if known.len() > KNOWN_LIMIT {
+                        known.clear();
+                    }
+                    for item in &batch.items {
+                        known.insert(item.id.clone(), item.actions.clone());
+                    }
+                }
                 for item in &mut batch.items {
                     if !item.accessories.contains(&label) {
                         item.accessories.push(label.clone());
@@ -87,6 +126,40 @@ impl Provider for CommandProvider {
                 batch
             })
             .boxed()
+    }
+
+    fn run_action_outcome(
+        &self,
+        item_id: &str,
+        action_id: &str,
+    ) -> Option<Result<ActionOutcome, String>> {
+        let action = {
+            let known = self.known.lock().unwrap_or_else(|e| e.into_inner());
+            let actions = known.get(item_id)?;
+            actions.iter().find(|action| action.id == action_id).cloned()
+        };
+        let Some(action) = action else {
+            return Some(Err(format!("no action {action_id}")));
+        };
+        let payload = action.payload.as_deref().unwrap_or_default();
+        let hide = |result: std::io::Result<()>| {
+            result
+                .map(|()| ActionOutcome::from(ActionEffect::Hide))
+                .map_err(|error| format!("{}: {error}", action.title))
+        };
+        Some(match action.kind {
+            // Built-in kinds are the daimos' job: the script never starts for them.
+            ActionKind::Open => hide(self.opener.open(payload)),
+            ActionKind::Run => hide(self.opener.run(payload)),
+            ActionKind::Custom => self
+                .backend
+                .custom_action(&self.extension, &self.command, item_id, action_id)
+                .map(|toast| ActionOutcome { effect: ActionEffect::Stay, toast }),
+            ActionKind::Copy | ActionKind::Paste => {
+                Err("copy and paste run in the window, not in the host".into())
+            }
+            ActionKind::Push | ActionKind::Form => Err("extensions cannot push views yet".into()),
+        })
     }
 }
 
@@ -243,5 +316,116 @@ pub(crate) mod tests {
         let batches =
             futures::executor::block_on(provider.query(ctx("firefox")).collect::<Vec<_>>());
         assert!(batches.is_empty());
+    }
+
+    /// Records what the host was asked to open or run.
+    #[derive(Default)]
+    pub(crate) struct Recorder {
+        pub(crate) calls: Mutex<Vec<String>>,
+        pub(crate) fail: bool,
+    }
+
+    impl Opener for Recorder {
+        fn open(&self, target: &str) -> std::io::Result<()> {
+            self.calls.lock().unwrap().push(format!("open {target}"));
+            if self.fail { Err(std::io::Error::other("no browser")) } else { Ok(()) }
+        }
+        fn run(&self, command_line: &str) -> std::io::Result<()> {
+            self.calls.lock().unwrap().push(format!("run {command_line}"));
+            Ok(())
+        }
+    }
+
+    /// Answers with one item that has an action of every kind, and counts custom actions.
+    #[derive(Default)]
+    struct WithActions {
+        custom: Mutex<Vec<String>>,
+    }
+
+    impl Backend for WithActions {
+        fn query(&self, _: &str, _: &str, _: QueryContext) -> BoxStream<'static, ItemBatch> {
+            let mut item = Item::new("r1", "Repo");
+            let action = |id: &str, kind, payload: Option<&str>| Action {
+                id: id.into(),
+                title: id.into(),
+                shortcut: None,
+                kind,
+                payload: payload.map(Into::into),
+            };
+            item.actions = vec![
+                action("open", ActionKind::Open, Some("https://example.com")),
+                action("term", ActionKind::Run, Some("git status")),
+                action("copy", ActionKind::Copy, Some("text")),
+                action("star", ActionKind::Custom, None),
+                action("view", ActionKind::Push, Some("v")),
+            ];
+            stream::once(async move { ItemBatch::from(vec![item]) }).boxed()
+        }
+
+        fn custom_action(
+            &self,
+            ext: &str,
+            command: &str,
+            item: &str,
+            action: &str,
+        ) -> Result<Option<String>, String> {
+            self.custom.lock().unwrap().push(format!("{ext}/{command}/{item}/{action}"));
+            if item == "r1" { Ok(Some("Starred".into())) } else { Err("nope".into()) }
+        }
+    }
+
+    fn provider_with(recorder: &Arc<Recorder>) -> (CommandProvider, Arc<WithActions>) {
+        let backend = Arc::new(WithActions::default());
+        let manifest = manifest("gh", r#"["gh"]"#);
+        let provider = CommandProvider::new(&manifest, &manifest.commands[0], backend.clone())
+            .with_opener(recorder.clone());
+        futures::executor::block_on(provider.query(ctx("x")).collect::<Vec<_>>());
+        (provider, backend)
+    }
+
+    #[test]
+    fn built_in_actions_run_in_the_host_and_never_reach_the_backend() {
+        let recorder = Arc::new(Recorder::default());
+        let (provider, backend) = provider_with(&recorder);
+        let hide = Some(Ok(ActionOutcome { effect: ActionEffect::Hide, toast: None }));
+        assert_eq!(provider.run_action_outcome("r1", "open"), hide);
+        assert_eq!(provider.run_action_outcome("r1", "term"), hide);
+        assert_eq!(*recorder.calls.lock().unwrap(), ["open https://example.com", "run git status"]);
+        assert!(backend.custom.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_custom_action_goes_to_the_backend_and_its_toast_comes_back() {
+        let recorder = Arc::new(Recorder::default());
+        let (provider, backend) = provider_with(&recorder);
+        assert_eq!(
+            provider.run_action_outcome("r1", "star"),
+            Some(Ok(ActionOutcome { effect: ActionEffect::Stay, toast: Some("Starred".into()) }))
+        );
+        assert_eq!(*backend.custom.lock().unwrap(), ["gh/search/r1/star"]);
+        assert!(recorder.calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failures_and_unsupported_kinds_are_errors() {
+        let recorder = Arc::new(Recorder { fail: true, ..Recorder::default() });
+        let (provider, _) = provider_with(&recorder);
+        let error = provider.run_action_outcome("r1", "open").unwrap().unwrap_err();
+        assert!(error.contains("no browser"), "{error}");
+        for action in ["copy", "view", "missing"] {
+            assert!(provider.run_action_outcome("r1", action).unwrap().is_err(), "{action}");
+        }
+    }
+
+    #[test]
+    fn items_of_other_providers_are_not_ours() {
+        let recorder = Arc::new(Recorder::default());
+        let (provider, _) = provider_with(&recorder);
+        assert_eq!(provider.run_action_outcome("app:firefox", "open"), None);
+    }
+
+    #[test]
+    fn the_default_backend_cannot_run_custom_actions() {
+        assert!(StubBackend.custom_action("a", "b", "c", "d").is_err());
     }
 }

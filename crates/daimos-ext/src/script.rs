@@ -170,6 +170,35 @@ impl OneShot {
             .boxed()
     }
 
+    /// Starts the script for a custom action and waits for its `result`. The answer is the toast,
+    /// if the script sent one. A script that exits without a result succeeded without a toast.
+    /// The same timeout and cancel rules as for a query apply.
+    pub async fn action(
+        &self,
+        command: &str,
+        item: &str,
+        action: &str,
+        cancel: CancellationToken,
+    ) -> Result<Option<String>, Failure> {
+        let request = Request::Action {
+            id: REQUEST_ID,
+            command: command.to_owned(),
+            item: item.to_owned(),
+            action: action.to_owned(),
+        };
+        let mut steps =
+            self.run(request, cancel, |response| matches!(response, Response::Result { .. }));
+        let mut toast = None;
+        while let Some(step) = steps.next().await {
+            match step {
+                Step::Failed(failure) => return Err(failure),
+                Step::Message(Response::Result { id: REQUEST_ID, toast: sent, .. }) => toast = sent,
+                Step::Message(_) => {}
+            }
+        }
+        Ok(toast)
+    }
+
     /// Streams the messages of one process. The stream ends right after a message for which `stop`
     /// is true.
     fn run(
@@ -225,7 +254,7 @@ struct Pending {
 struct Running {
     child: Child,
     lines: Lines<BufReader<ChildStdout>>,
-    stderr: JoinHandle<Option<String>>,
+    stderr: Option<JoinHandle<Option<String>>>,
     timeout: Duration,
     deadline: Instant,
     cancel: CancellationToken,
@@ -278,7 +307,7 @@ async fn start(pending: Pending) -> Option<(Step, State)> {
     let run = Running {
         child,
         lines: stdout.lines(),
-        stderr,
+        stderr: Some(stderr),
         timeout: pending.spec.timeout,
         deadline: pending.deadline,
         cancel: pending.cancel,
@@ -345,6 +374,30 @@ impl Backend for ScriptBackend {
                 }
             })
             .boxed()
+    }
+
+    fn custom_action(
+        &self,
+        extension: &str,
+        command: &str,
+        item: &str,
+        action: &str,
+    ) -> Result<Option<String>, String> {
+        let runner = self.runner(extension).ok_or_else(|| format!("{extension} is not loaded"))?;
+        let (command, item, action) = (command.to_owned(), item.to_owned(), action.to_owned());
+        // A thread of its own with its own runtime: this call blocks, and may be made from a
+        // thread that has no runtime or from one that must not block one.
+        let outcome = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| error.to_string())?;
+            runtime
+                .block_on(runner.action(&command, &item, &action, CancellationToken::new()))
+                .map_err(|failure| format!("{}: {}", runner.extension, failure.message()))
+        })
+        .join();
+        outcome.unwrap_or_else(|_| Err(format!("{extension} stopped unexpectedly")))
     }
 
     fn load(&self, extension: &LoadedExtension) {
@@ -426,14 +479,17 @@ async fn open_log(path: &Path) -> Option<tokio::fs::File> {
 }
 
 impl Running {
-    /// Kills the process and waits for it, so no zombie remains.
+    /// Kills the process and waits for it, so no zombie remains, then lets the stderr pump finish
+    /// so the log is complete when the stream ends.
     async fn kill(&mut self) {
         let _ = self.child.kill().await;
+        self.last_stderr().await;
     }
 
     /// The last stderr line once the pipe has closed (or after a short grace period).
-    async fn last_stderr(self) -> Option<String> {
-        tokio::time::timeout(STDERR_GRACE, self.stderr).await.ok()?.ok()?
+    async fn last_stderr(&mut self) -> Option<String> {
+        let handle = self.stderr.take()?;
+        tokio::time::timeout(STDERR_GRACE, handle).await.ok()?.ok()?
     }
 }
 
@@ -535,6 +591,8 @@ pub(crate) mod testutil {
 mod tests {
     use std::sync::Arc;
     use std::time::Instant as StdInstant;
+
+    use daimos_core::provider::Provider;
 
     use super::testutil::{python, write_script};
     use super::*;
@@ -1045,5 +1103,119 @@ mod tests {
         let log = backend.runner("demo").unwrap().log;
         assert_eq!(log, Some(Path::new("data").join("logs").join("demo.log")));
         assert_eq!(ScriptBackend::new().runner("demo").map(|r| r.log), None);
+    }
+
+    /// A script that answers a query with one item and an action with a toast.
+    fn actions_script(action_branch: &str) -> String {
+        format!(
+            "{PRELUDE}open('runs', 'a').write(request['type'] + '\\n')\n\
+             if request['type'] == 'query':\n    send({{'id': request['id'], 'type': 'items', 'done': True, \
+             'items': [{{'id': 'r1', 'title': 'Repo', 'actions': [\
+             {{'id': 'open', 'title': 'Open', 'kind': 'open', 'url': 'https://example.com'}}, \
+             {{'id': 'star', 'title': 'Star', 'kind': 'custom'}}]}}]}})\n\
+             else:\n{action_branch}"
+        )
+    }
+
+    fn backend_for(
+        root: &Path,
+        python: &str,
+        action_branch: &str,
+        timeout_ms: u64,
+    ) -> ScriptBackend {
+        let backend = ScriptBackend::new();
+        let loaded = install(root, python, false, &actions_script(action_branch));
+        let manifest = std::fs::read_to_string(loaded.dir.join("extension.toml")).unwrap();
+        let manifest = manifest.replace(
+            "long_running = false",
+            &format!("long_running = false\ntimeout_ms = {timeout_ms}"),
+        );
+        std::fs::write(loaded.dir.join("extension.toml"), manifest).unwrap();
+        backend.load(&dir::load_extension(&loaded.dir).unwrap());
+        backend
+    }
+
+    #[test]
+    fn a_custom_action_reaches_the_script_and_its_toast_comes_back() {
+        let python = python_or_skip!();
+        let root = tempfile::tempdir().unwrap();
+        let branch = "    send({'id': request['id'], 'type': 'result', 'toast': 'Starred ' + request['item'] + ' ' + request['action'] + ' ' + request['command'], 'view': None})\n";
+        let backend = backend_for(root.path(), python, branch, 10_000);
+        assert_eq!(
+            backend.custom_action("demo", "search", "r1", "star"),
+            Ok(Some("Starred r1 star search".to_owned()))
+        );
+    }
+
+    #[test]
+    fn a_script_that_sends_no_result_succeeds_without_a_toast() {
+        let python = python_or_skip!();
+        let root = tempfile::tempdir().unwrap();
+        let backend = backend_for(root.path(), python, "    pass\n", 10_000);
+        assert_eq!(backend.custom_action("demo", "search", "r1", "star"), Ok(None));
+    }
+
+    #[test]
+    fn a_failing_custom_action_reports_an_error_with_the_last_stderr_line() {
+        let python = python_or_skip!();
+        let root = tempfile::tempdir().unwrap();
+        let branch = "    sys.stderr.write('token expired\\n')\n    sys.exit(2)\n";
+        let backend = backend_for(root.path(), python, branch, 10_000);
+        assert_eq!(
+            backend.custom_action("demo", "search", "r1", "star"),
+            Err("demo: token expired".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_hanging_custom_action_times_out_instead_of_hanging() {
+        let python = python_or_skip!();
+        let root = tempfile::tempdir().unwrap();
+        let backend = backend_for(root.path(), python, "    time.sleep(60)\n", 300);
+        let started = StdInstant::now();
+        let error = backend.custom_action("demo", "search", "r1", "star").unwrap_err();
+        assert!(error.contains("timed out after 300 ms"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    #[test]
+    fn a_custom_action_of_an_unloaded_extension_is_an_error() {
+        let error = ScriptBackend::new().custom_action("gone", "c", "i", "a").unwrap_err();
+        assert!(error.contains("gone"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn a_built_in_action_never_starts_the_script() {
+        let python = python_or_skip!();
+        let root = tempfile::tempdir().unwrap();
+        let backend = Arc::new(backend_for(root.path(), python, "    pass\n", 10_000));
+        let recorder = Arc::new(crate::provider::tests::Recorder::default());
+        let manifest = install_manifest(root.path());
+        let provider =
+            crate::provider::CommandProvider::new(&manifest, &manifest.commands[0], backend)
+                .with_opener(recorder.clone());
+        let batches: Vec<_> = provider
+            .query(QueryContext {
+                text: "x".into(),
+                keyword_routed: true,
+                cancel: CancellationToken::new(),
+            })
+            .collect()
+            .await;
+        assert_eq!(batches.len(), 1);
+        assert_eq!(runs(root.path()), 1, "the query started the script once");
+
+        let outcome = provider.run_action_outcome("r1", "open").unwrap().unwrap();
+        assert_eq!(outcome.effect, daimos_core::ActionEffect::Hide);
+        assert_eq!(*recorder.calls.lock().unwrap(), ["open https://example.com"]);
+        assert_eq!(runs(root.path()), 1, "a built-in action did not start the script");
+
+        let custom = provider.run_action_outcome("r1", "star").unwrap().unwrap();
+        assert_eq!(custom.toast, None);
+        assert_eq!(runs(root.path()), 2, "a custom action did");
+    }
+
+    fn install_manifest(root: &Path) -> crate::manifest::Manifest {
+        dir::load_extension(&root.join("demo")).unwrap().manifest
     }
 }

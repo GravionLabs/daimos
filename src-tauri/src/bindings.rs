@@ -56,26 +56,35 @@ pub fn hide_window(app: AppHandle) {
 }
 
 /// Runs an action of a result (`Enter` runs `open`). The window hides after a successful start,
-/// so the application that was launched can take the focus.
+/// so the application that was launched can take the focus. Answers with the message an extension
+/// action wants to show, if any. An extension action can take a while, so it runs off the main
+/// thread.
 #[tauri::command]
 #[specta::specta]
-pub fn run_action(
+pub async fn run_action(
     app: AppHandle,
     engine: State<'_, std::sync::Arc<QueryEngine>>,
     runner: State<'_, std::sync::Arc<daimos_core::actions::ActionRunner>>,
     item_id: String,
     action_id: String,
-) -> Result<(), String> {
-    // Items of a provider (the clipboard history) are run by it; the rest are applications.
-    if let Some(result) = engine.run_action(&item_id, &action_id) {
-        let effect = result.map_err(|error| {
+) -> Result<Option<String>, String> {
+    // Items of a provider (the clipboard history, extensions) are run by it; the rest are
+    // applications.
+    let provider_engine = std::sync::Arc::clone(&engine);
+    let (item, action) = (item_id.clone(), action_id.clone());
+    let owned =
+        tauri::async_runtime::spawn_blocking(move || provider_engine.run_action(&item, &action))
+            .await
+            .map_err(|error| error.to_string())?;
+    if let Some(result) = owned {
+        let outcome = result.map_err(|error| {
             log::warn!("action {action_id} of {item_id} failed: {error}");
             error
         })?;
-        if effect == daimos_core::ActionEffect::Hide {
+        if outcome.effect == daimos_core::ActionEffect::Hide {
             crate::window_control::hide(&app);
         }
-        return Ok(());
+        return Ok(outcome.toast);
     }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -85,7 +94,7 @@ pub fn run_action(
         error.to_string()
     })?;
     crate::window_control::hide(&app);
-    Ok(())
+    Ok(None)
 }
 
 /// The view a `push` or `form` action of a result of `provider` points to.
