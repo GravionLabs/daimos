@@ -8,8 +8,7 @@ banner:
 Extensions add commands to Daimos. An extension is a script (any language, JSON Lines over
 standard input and output) or a WebAssembly component.
 
-The tutorial, the manifest and protocol reference, and the WIT reference land with the extension
-host. Until then, the design is in
+The tutorial and the WIT reference land with the extension host. Until then, the design is in
 [`docs/specs/extensions.md`](https://github.com/GravionLabs/daimos/blob/main/docs/specs/extensions.md).
 
 ## Where extensions live
@@ -64,4 +63,5 @@ list` shows the state of every extension, see the [manifest reference](manifest/
 ## Pages
 
 - [Manifest reference](manifest/): the sections and fields of `extension.toml`.
+- [Script extensions](scripts/): write an extension as a script that speaks JSON Lines.
 - [Extension commands](cli/): `daimos ext list` shows the installed extensions and their state.

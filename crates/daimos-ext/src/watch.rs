@@ -53,7 +53,7 @@ impl ExtensionHost {
         }
         for key in self.registry.extensions() {
             if !seen.contains(&key) {
-                self.registry.remove(&key);
+                self.forget(&key);
             }
         }
         // In name order, so a duplicate name always fails the same (later) directory.
@@ -67,9 +67,11 @@ impl ExtensionHost {
     pub fn reload(&self, key: &str) {
         let path = self.root.join(key);
         if self.extension_key(&path).is_none() {
-            self.registry.remove(key);
+            self.forget(key);
             return;
         }
+        // The backend drops what it knew; it learns the extension again if it loads.
+        self.unload(key);
         match dir::load_extension(&path) {
             Ok(extension) => {
                 let manifest = &extension.manifest;
@@ -90,12 +92,26 @@ impl ExtensionHost {
                     self.fail(key, message);
                     return;
                 }
+                self.backend.load(&extension);
                 let providers = providers_for(manifest, &self.backend);
                 self.registry.replace(ExtensionRecord::enabled(key, manifest), providers);
                 log::info!("loaded extension {key}");
             }
             Err(error) => self.fail(key, error.to_string()),
         }
+    }
+
+    /// Tells the backend that the extension in directory `key` is no longer loaded.
+    fn unload(&self, key: &str) {
+        if let Some(record) = self.registry.record(key) {
+            self.backend.unload(&record.name);
+        }
+    }
+
+    /// Drops an extension from the registry and the backend.
+    fn forget(&self, key: &str) {
+        self.unload(key);
+        self.registry.remove(key);
     }
 
     fn fail(&self, key: &str, message: String) {

@@ -24,6 +24,11 @@ pub fn extensions_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|dir| extensions_dir_in(&dir))
 }
 
+/// `<data dir>/logs/<extension>.log`: where the stderr of a script extension goes.
+pub fn log_path_in(data_dir: &Path, extension: &str) -> PathBuf {
+    data_dir.join("logs").join(format!("{extension}.log"))
+}
+
 /// An extension that loaded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadedExtension {
@@ -124,6 +129,14 @@ mod tests {
              [[commands]]\nname = \"go\"\ntitle = \"Go\"\nkeywords = [\"{name}\"]\n\n\
              [runtime.script]\ncommand = [\"run.sh\"]\n"
         )
+    }
+
+    #[test]
+    fn the_log_of_an_extension_is_in_the_logs_folder_of_the_data_dir() {
+        assert_eq!(
+            log_path_in(Path::new("data"), "notes"),
+            Path::new("data").join("logs").join("notes.log")
+        );
     }
 
     fn write(root: &Path, dir: &str, file: &str, content: &str) {

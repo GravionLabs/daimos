@@ -66,6 +66,23 @@ pub struct ScriptRuntime {
     pub command: Vec<String>,
     #[serde(default)]
     pub long_running: bool,
+    /// How long one query or action may take before the process is killed, in milliseconds.
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
+}
+
+/// The default of `timeout_ms`.
+pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
+
+fn default_timeout_ms() -> u64 {
+    DEFAULT_TIMEOUT_MS
+}
+
+impl ScriptRuntime {
+    /// `timeout_ms` as a [`Duration`](std::time::Duration).
+    pub fn timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.timeout_ms)
+    }
 }
 
 /// `[runtime.wasm]`.
@@ -218,6 +235,14 @@ impl Manifest {
                 "must name the program to run".into(),
             ));
         }
+        if let Some(script) = &self.runtime.script
+            && script.timeout_ms == 0
+        {
+            return Err(fail(
+                vec![key("runtime"), key("script"), key("timeout_ms")],
+                "must be greater than 0".into(),
+            ));
+        }
         if let Some(wasm) = &self.runtime.wasm
             && wasm.component.trim().is_empty()
         {
@@ -364,6 +389,8 @@ required = true
         let script = manifest.runtime.script.unwrap();
         assert_eq!(script.command, ["python3", "main.py"]);
         assert!(script.long_running);
+        assert_eq!(script.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(script.timeout(), std::time::Duration::from_secs(5));
         assert!(manifest.runtime.wasm.is_none());
         assert_eq!(manifest.capabilities, Capabilities::default());
     }
@@ -511,5 +538,35 @@ required = true
     fn keywords_without_text_or_with_spaces_are_rejected() {
         rejects("[\"n\", \"note\"]", "[\"n\", \"two words\"]", 11, "commands[0].keywords");
         rejects("[\"n\", \"note\"]", "[\"\"]", 11, "commands[0].keywords");
+    }
+
+    #[test]
+    fn timeout_ms_is_read_from_the_script_table() {
+        let source =
+            SCRIPT.replace("long_running = true", "long_running = false\ntimeout_ms = 250");
+        let script = parse(&source).unwrap().runtime.script.unwrap();
+        assert_eq!(script.timeout_ms, 250);
+        assert_eq!(script.timeout(), std::time::Duration::from_millis(250));
+    }
+
+    #[test]
+    fn a_zero_timeout_is_rejected_with_its_line() {
+        let error =
+            rejects("long_running = true", "timeout_ms = 0", 15, "runtime.script.timeout_ms");
+        assert!(error.message.contains("greater than 0"), "{error}");
+    }
+
+    #[test]
+    fn a_negative_or_non_numeric_timeout_is_rejected() {
+        for value in ["-1", "\"fast\""] {
+            let error =
+                parse(&SCRIPT.replace("long_running = true", &format!("timeout_ms = {value}")))
+                    .unwrap_err();
+            assert_eq!(
+                (error.line, error.field.as_str()),
+                (15, "runtime.script.timeout_ms"),
+                "{value}: {error}"
+            );
+        }
     }
 }

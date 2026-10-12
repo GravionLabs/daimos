@@ -96,7 +96,7 @@ export function fakeHost() {
     loadView: vi.fn(() => Promise.reject(new Error("no view"))),
     submitForm: vi.fn(() => Promise.resolve()),
     query: vi.fn(),
-    runAction: vi.fn(() => Promise.resolve()),
+    runAction: vi.fn(() => Promise.resolve<string | null>(null)),
     iconSrc: (icon: Icon) => (icon.type === "file" ? `asset://${icon.path}` : null),
     hide: vi.fn(),
     resize: vi.fn(),
