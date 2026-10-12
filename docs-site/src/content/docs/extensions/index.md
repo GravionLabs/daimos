@@ -56,8 +56,9 @@ message names the file, the line, and the field, for example:
 extension.toml:3: extension.name: `My Ext` is not a safe name: use lowercase letters, digits, `-` and `_` (at most 64)
 ```
 
-The result shows when the search is empty or when you type part of the folder name. Fix the file
-and save it: the error disappears and the extension works again without a restart. `daimos ext
+The result shows in the palette when the search is empty or when you type part of the folder
+name. Each broken extension has exactly one result, and the other extensions keep answering. Fix
+the file and save it: the error disappears and the extension works again without a restart. `daimos ext
 list` shows the state of every extension, see the [manifest reference](manifest/) for the rules.
 
 ## Pages

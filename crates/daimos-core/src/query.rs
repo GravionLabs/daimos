@@ -70,8 +70,12 @@ impl From<&crate::settings::Settings> for EngineConfig {
     }
 }
 
+/// Returns the providers that come and go while the app runs, such as those of extensions.
+pub type ProviderSource = Arc<dyn Fn() -> Vec<Arc<dyn Provider>> + Send + Sync>;
+
 pub struct QueryEngine {
     providers: Vec<Arc<dyn Provider>>,
+    dynamic: Option<ProviderSource>,
     sink: Sink,
     handle: Handle,
     sessions: Mutex<HashMap<u32, Arc<Running>>>,
@@ -83,11 +87,28 @@ impl QueryEngine {
     pub fn new(providers: Vec<Arc<dyn Provider>>, sink: Sink, handle: Handle) -> Self {
         Self {
             providers,
+            dynamic: None,
             sink,
             handle,
             sessions: Mutex::new(HashMap::new()),
             config: RwLock::new(EngineConfig::default()),
         }
+    }
+
+    /// Adds a source that is asked for its providers at every query, so changes apply live.
+    #[must_use]
+    pub fn with_dynamic(mut self, source: ProviderSource) -> Self {
+        self.dynamic = Some(source);
+        self
+    }
+
+    /// The fixed providers followed by the current ones of the dynamic source.
+    fn all_providers(&self) -> Vec<Arc<dyn Provider>> {
+        let mut all = self.providers.clone();
+        if let Some(source) = &self.dynamic {
+            all.extend(source());
+        }
+        all
     }
 
     /// Replaces the user's choices; the next query uses them.
@@ -97,7 +118,7 @@ impl QueryEngine {
 
     /// The ids and own weights of all providers, for the settings page.
     pub fn providers(&self) -> Vec<(String, f32)> {
-        self.providers.iter().map(|p| (p.id().to_owned(), p.weight())).collect()
+        self.all_providers().iter().map(|p| (p.id().to_owned(), p.weight())).collect()
     }
 
     /// Cancels the previous query of `session` and starts a new one.
@@ -138,7 +159,7 @@ impl QueryEngine {
 
     /// The view `view_id` of `provider`, for a `push` or `form` action.
     pub fn view(&self, provider: &str, view_id: &str) -> Option<crate::model::View> {
-        self.providers.iter().find(|p| p.id() == provider)?.view(view_id)
+        self.all_providers().iter().find(|p| p.id() == provider)?.view(view_id)
     }
 
     /// Lets the providers run an action of an item; `None` when no provider owns the item.
@@ -147,7 +168,7 @@ impl QueryEngine {
         item_id: &str,
         action_id: &str,
     ) -> Option<Result<crate::provider::ActionEffect, String>> {
-        self.providers.iter().find_map(|p| p.run_action(item_id, action_id))
+        self.all_providers().iter().find_map(|p| p.run_action(item_id, action_id))
     }
 
     /// Hands the values of a submitted form to its provider.
@@ -157,8 +178,8 @@ impl QueryEngine {
         view_id: &str,
         values: &HashMap<String, String>,
     ) -> Result<(), String> {
-        let provider = self
-            .providers
+        let all = self.all_providers();
+        let provider = all
             .iter()
             .find(|p| p.id() == provider)
             .ok_or_else(|| format!("no provider {provider}"))?;
@@ -175,12 +196,12 @@ impl QueryEngine {
 
     /// `gh repo` goes to the provider with keyword `gh` only; everything else to all providers.
     fn route(&self, text: &str) -> (Vec<Arc<dyn Provider>>, String, bool) {
+        let all = self.all_providers();
         let trimmed = text.trim_start();
         let (first, rest) = trimmed.split_once(char::is_whitespace).unwrap_or((trimmed, ""));
         if !first.is_empty() && trimmed.len() > first.len() {
             let keyword = first.to_lowercase();
-            let routed: Vec<_> = self
-                .providers
+            let routed: Vec<_> = all
                 .iter()
                 .filter(|p| p.keywords().iter().any(|k| k.to_lowercase() == keyword))
                 .cloned()
@@ -189,7 +210,7 @@ impl QueryEngine {
                 return (routed, rest.trim_start().to_owned(), true);
             }
         }
-        (self.providers.clone(), text.to_owned(), false)
+        (all, text.to_owned(), false)
     }
 }
 
@@ -388,6 +409,29 @@ mod tests {
             batches.iter().flat_map(|b| b.items.iter().map(|i| i.id.as_str())).collect();
         assert_eq!(ids, ["late:early"]);
         assert!(batches.last().unwrap().done);
+    }
+
+    #[tokio::test]
+    async fn providers_of_a_dynamic_source_are_used_at_every_query() {
+        let source: Arc<Mutex<Vec<Arc<dyn Provider>>>> = Arc::new(Mutex::new(Vec::new()));
+        let (engine, mut rx) = engine(vec![Fake::new("apps", vec![vec!["a"]])]);
+        let shared = Arc::clone(&source);
+        let engine = engine.with_dynamic(Arc::new(move || shared.lock().unwrap().clone()));
+        engine.query(1, "x");
+        assert!(until_done(&mut rx, 1).await.iter().all(|b| b.provider == "apps"));
+
+        let mut ext = Fake::new("ext", vec![vec!["e"]]);
+        ext.keyword = Some("ext");
+        source.lock().unwrap().push(Arc::new(ext));
+        engine.query(2, "ext hello");
+        let batches = until_done(&mut rx, 1).await;
+        assert!(batches.iter().all(|b| b.provider == "ext"));
+        assert_eq!(engine.providers().len(), 2);
+
+        source.lock().unwrap().clear();
+        engine.query(3, "ext hello");
+        let batches = until_done(&mut rx, 1).await;
+        assert!(batches.iter().all(|b| b.provider == "apps"));
     }
 
     #[tokio::test]

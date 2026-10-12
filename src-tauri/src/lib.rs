@@ -97,7 +97,13 @@ fn setup_query_engine(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
     ];
     app.manage(Arc::new(daimos_core::actions::ActionRunner::new(Arc::clone(&index), frecency)));
     let runtime = tauri::async_runtime::handle();
-    let engine = Arc::new(daimos_core::QueryEngine::new(providers, sink, runtime.inner().clone()));
+    // The extension registry exists before the engine; its providers are read at every query.
+    let registry = Arc::new(daimos_ext::Registry::new());
+    app.manage(Arc::clone(&registry));
+    let engine = Arc::new(
+        daimos_core::QueryEngine::new(providers, sink, runtime.inner().clone())
+            .with_dynamic(Arc::new(move || registry.providers())),
+    );
     // What the user switched off or renamed in the settings applies from the first query.
     match SettingsStore::new(app.path().app_config_dir()?).load() {
         Ok(settings) => engine.set_config(daimos_core::query::EngineConfig::from(&settings)),
@@ -117,8 +123,7 @@ fn setup_extensions(app: &tauri::App) {
         log::warn!("no config directory, extensions are off");
         return;
     };
-    let registry = Arc::new(Registry::new());
-    app.manage(Arc::clone(&registry));
+    let registry = Arc::clone(&*app.state::<Arc<Registry>>());
     let host = Arc::new(ExtensionHost::new(root, Arc::new(StubBackend), registry));
     match host.watch(std::time::Duration::from_millis(250)) {
         Ok(watcher) => {
