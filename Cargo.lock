@@ -1042,6 +1042,8 @@ dependencies = [
  "daimos-core",
  "dirs 7.0.0",
  "futures",
+ "log",
+ "notify",
  "serde",
  "tempfile",
  "tokio-util",

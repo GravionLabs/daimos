@@ -40,6 +40,26 @@ Folders without an `extension.toml`, files, and folders whose name starts with a
 A broken extension does not stop the others from loading. Two extensions cannot share a name: the
 second one (in folder-name order) is reported as an error.
 
+## Hot reload
+
+Daimos watches the extension directory. When you save a file in an extension folder, add a folder,
+or delete one, that extension is read again about a quarter of a second after the last change. You
+do not restart Daimos. A new keyword works at once.
+
+## A broken manifest
+
+If an `extension.toml` cannot be loaded, Daimos disables only that extension and keeps running.
+You see one result with the title "`<folder>` could not be loaded" and the message under it. The
+message names the file, the line, and the field, for example:
+
+```text
+extension.toml:3: extension.name: `My Ext` is not a safe name: use lowercase letters, digits, `-` and `_` (at most 64)
+```
+
+The result shows when the search is empty or when you type part of the folder name. Fix the file
+and save it: the error disappears and the extension works again without a restart. `daimos ext
+list` shows the state of every extension, see the [manifest reference](manifest/) for the rules.
+
 ## Pages
 
 - [Manifest reference](manifest/): the sections and fields of `extension.toml`.

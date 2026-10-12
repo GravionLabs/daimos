@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use daimos_core::model::ItemBatch;
+use daimos_core::model::{Item, ItemBatch};
 use daimos_core::provider::{Provider, QueryContext};
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
@@ -83,6 +83,44 @@ impl Provider for CommandProvider {
     }
 }
 
+/// The one item a broken extension shows instead of its commands.
+///
+/// It appears for an empty query and for a query that names the extension's directory, so the
+/// problem is seen without cluttering every search.
+pub struct ErrorProvider {
+    id: String,
+    key: String,
+    message: String,
+}
+
+impl ErrorProvider {
+    pub fn new(key: &str, message: &str) -> Self {
+        Self { id: format!("{key}.error"), key: key.to_owned(), message: message.to_owned() }
+    }
+
+    fn matches(&self, text: &str) -> bool {
+        let text = text.trim().to_lowercase();
+        let key = self.key.to_lowercase();
+        text.is_empty() || key.contains(&text) || text.contains(&key)
+    }
+}
+
+impl Provider for ErrorProvider {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn query(&self, ctx: QueryContext) -> BoxStream<'static, ItemBatch> {
+        if !self.matches(&ctx.text) {
+            return stream::empty().boxed();
+        }
+        let mut item = Item::new(self.id.clone(), format!("{} could not be loaded", self.key));
+        item.subtitle = Some(self.message.clone());
+        item.accessories.push(self.key.clone());
+        stream::once(async move { ItemBatch::from(vec![item]) }).boxed()
+    }
+}
+
 /// One provider per command of `manifest`, in manifest order.
 pub fn providers_for(manifest: &Manifest, backend: &Arc<dyn Backend>) -> Vec<Arc<dyn Provider>> {
     manifest
@@ -99,7 +137,6 @@ pub fn providers_for(manifest: &Manifest, backend: &Arc<dyn Backend>) -> Vec<Arc
 pub(crate) mod tests {
     use std::path::Path;
 
-    use daimos_core::model::Item;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -166,5 +203,26 @@ pub(crate) mod tests {
         let item = &batches[0].items[0];
         assert_eq!((item.id.as_str(), item.title.as_str()), ("gh/search", "lau"));
         assert_eq!(item.accessories, ["Title of gh"]);
+    }
+
+    #[test]
+    fn the_error_provider_shows_one_item_with_the_message() {
+        let provider = ErrorProvider::new("github", "extension.toml:3: extension.name: bad");
+        assert_eq!(provider.id(), "github.error");
+        for text in ["", "  ", "git", "github", "github foo"] {
+            let batches =
+                futures::executor::block_on(provider.query(ctx(text)).collect::<Vec<_>>());
+            assert_eq!(batches.len(), 1, "{text:?}");
+            let item = &batches[0].items[0];
+            assert_eq!(item.subtitle.as_deref(), Some("extension.toml:3: extension.name: bad"));
+        }
+    }
+
+    #[test]
+    fn the_error_provider_stays_quiet_for_unrelated_queries() {
+        let provider = ErrorProvider::new("github", "bad");
+        let batches =
+            futures::executor::block_on(provider.query(ctx("firefox")).collect::<Vec<_>>());
+        assert!(batches.is_empty());
     }
 }
