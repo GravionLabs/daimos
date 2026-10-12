@@ -27,6 +27,8 @@ pub enum ActionKind {
     Run,
     Push,
     Form,
+    /// Handled by the extension that owns the item.
+    Custom,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Type)]

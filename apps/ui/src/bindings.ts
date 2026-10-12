@@ -75,7 +75,7 @@ export type Action = {
 	payload: string | null,
 };
 
-export type ActionKind = "open" | "copy" | "paste" | "run" | "push" | "form";
+export type ActionKind = "open" | "copy" | "paste" | "run" | "push" | "form" | "custom";
 
 export type AliasEntry = {
 	alias: string,

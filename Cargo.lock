@@ -1046,6 +1046,7 @@ dependencies = [
  "log",
  "notify",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-util",

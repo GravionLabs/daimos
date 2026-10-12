@@ -3,6 +3,7 @@
 pub mod dir;
 pub mod error;
 pub mod manifest;
+pub mod protocol;
 pub mod provider;
 pub mod registry;
 pub mod watch;
