@@ -69,10 +69,21 @@ pub struct ScriptRuntime {
     /// How long one query or action may take before the process is killed, in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    /// How long a long-running process may sit without requests before it is stopped, in
+    /// milliseconds. Ignored when `long_running` is false.
+    #[serde(default = "default_idle_timeout_ms")]
+    pub idle_timeout_ms: u64,
 }
 
 /// The default of `timeout_ms`.
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
+
+/// The default of `idle_timeout_ms`: ten minutes.
+pub const DEFAULT_IDLE_TIMEOUT_MS: u64 = 600_000;
+
+fn default_idle_timeout_ms() -> u64 {
+    DEFAULT_IDLE_TIMEOUT_MS
+}
 
 fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
@@ -82,6 +93,11 @@ impl ScriptRuntime {
     /// `timeout_ms` as a [`Duration`](std::time::Duration).
     pub fn timeout(&self) -> std::time::Duration {
         std::time::Duration::from_millis(self.timeout_ms)
+    }
+
+    /// `idle_timeout_ms` as a [`Duration`](std::time::Duration).
+    pub fn idle_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.idle_timeout_ms)
     }
 }
 
@@ -308,6 +324,14 @@ impl Manifest {
         {
             return Err(fail(
                 vec![key("runtime"), key("script"), key("timeout_ms")],
+                "must be greater than 0".into(),
+            ));
+        }
+        if let Some(script) = &self.runtime.script
+            && script.idle_timeout_ms == 0
+        {
+            return Err(fail(
+                vec![key("runtime"), key("script"), key("idle_timeout_ms")],
                 "must be greater than 0".into(),
             ));
         }
@@ -633,6 +657,56 @@ required = true
             assert_eq!(
                 (error.line, error.field.as_str()),
                 (15, "runtime.script.timeout_ms"),
+                "{value}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn idle_timeout_ms_defaults_to_ten_minutes() {
+        let script = parse(SCRIPT).unwrap().runtime.script.unwrap();
+        assert_eq!(script.idle_timeout_ms, DEFAULT_IDLE_TIMEOUT_MS);
+        assert_eq!(script.idle_timeout(), std::time::Duration::from_secs(600));
+    }
+
+    #[test]
+    fn idle_timeout_ms_is_read_from_the_script_table() {
+        let source =
+            SCRIPT.replace("long_running = true", "long_running = true\nidle_timeout_ms = 1500");
+        let script = parse(&source).unwrap().runtime.script.unwrap();
+        assert_eq!(script.idle_timeout(), std::time::Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn idle_timeout_ms_is_accepted_and_ignored_for_one_shot_scripts() {
+        let source =
+            SCRIPT.replace("long_running = true", "long_running = false\nidle_timeout_ms = 1500");
+        let script = parse(&source).unwrap().runtime.script.unwrap();
+        assert!(!script.long_running);
+        assert_eq!(script.idle_timeout_ms, 1500);
+    }
+
+    #[test]
+    fn a_zero_idle_timeout_is_rejected_with_its_line() {
+        let error = rejects(
+            "long_running = true",
+            "idle_timeout_ms = 0",
+            15,
+            "runtime.script.idle_timeout_ms",
+        );
+        assert!(error.message.contains("greater than 0"), "{error}");
+    }
+
+    #[test]
+    fn a_negative_or_non_numeric_idle_timeout_is_rejected() {
+        for value in ["-1", "\"soon\""] {
+            let error = parse(
+                &SCRIPT.replace("long_running = true", &format!("idle_timeout_ms = {value}")),
+            )
+            .unwrap_err();
+            assert_eq!(
+                (error.line, error.field.as_str()),
+                (15, "runtime.script.idle_timeout_ms"),
                 "{value}: {error}"
             );
         }

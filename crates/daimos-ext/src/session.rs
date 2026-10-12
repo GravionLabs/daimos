@@ -31,6 +31,9 @@ use crate::script::{Event, Failure, OneShot, batches, pump_stderr_into};
 /// How long the end of a process waits for its stderr to drain.
 const STDERR_GRACE: Duration = Duration::from_millis(500);
 
+/// An idle process is given this long to exit after its input is closed, then it is killed.
+const IDLE_GRACE: Duration = Duration::from_millis(500);
+
 /// A closed output pipe is given this long to be followed by the exit before the process is killed.
 const EOF_GRACE: Duration = Duration::from_millis(200);
 
@@ -115,6 +118,8 @@ struct Proc {
     writer: UnboundedSender<String>,
     /// Kill the process (the supervisor does it).
     kill: CancellationToken,
+    /// Close the standard input of the process.
+    close_input: CancellationToken,
     /// Whether the end of the process was asked for (by a timeout, a shutdown), as opposed to a
     /// crash.
     deliberate: AtomicBool,
@@ -176,6 +181,25 @@ impl Proc {
         *lock(&self.pending) = None;
     }
 
+    /// When the process is next due for an idleness check: `idle` after the last traffic, or
+    /// `idle` from now while a request is in flight.
+    fn idle_wake(&self, idle: Duration) -> Instant {
+        let activity = lock(&self.activity);
+        if activity.in_flight > 0 { Instant::now() + idle } else { activity.last + idle }
+    }
+
+    /// Marks the process as stopped for idleness when no request has been in flight for `idle`;
+    /// no request registers after that. Not a crash.
+    fn idle_stop(&self, idle: Duration) -> bool {
+        let mut activity = lock(&self.activity);
+        if activity.dead || activity.in_flight > 0 || Instant::now() < activity.last + idle {
+            return false;
+        }
+        activity.dead = true;
+        self.deliberate.store(true, Ordering::SeqCst);
+        true
+    }
+
     /// Asks for the end of the process.
     fn stop(&self) {
         self.deliberate.store(true, Ordering::SeqCst);
@@ -201,12 +225,23 @@ impl Proc {
 }
 
 /// The tasks that belong to a process: write requests, read responses, and own the child.
-async fn write_loop(mut stdin: ChildStdin, mut lines: UnboundedReceiver<String>) {
-    while let Some(line) = lines.recv().await {
+async fn write_loop(
+    mut stdin: ChildStdin,
+    mut lines: UnboundedReceiver<String>,
+    close: CancellationToken,
+) {
+    loop {
+        let line = tokio::select! {
+            biased;
+            () = close.cancelled() => break,
+            line = lines.recv() => line,
+        };
+        let Some(line) = line else { break };
         if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
             break;
         }
     }
+    // `stdin` drops here: the script sees the end of its input.
 }
 
 async fn read_loop(stdout: ChildStdout, proc: Arc<Proc>, eof: CancellationToken) {
@@ -233,28 +268,52 @@ impl Proc {
     }
 }
 
+/// What the supervisor of a process needs to know about its session.
+struct Rules {
+    health: Arc<Mutex<Health>>,
+    policy: RestartPolicy,
+    idle: Duration,
+}
+
 async fn supervise(
     mut child: Child,
     proc: Arc<Proc>,
     eof: CancellationToken,
     stderr: JoinHandle<()>,
     exit: watch::Sender<Option<Exit>>,
-    health: Arc<Mutex<Health>>,
-    policy: RestartPolicy,
+    rules: Rules,
 ) {
-    let status = tokio::select! {
-        status = child.wait() => status,
-        () = proc.kill.cancelled() => {
-            let _ = child.kill().await;
-            child.wait().await
-        }
-        () = eof.cancelled() => match timeout(EOF_GRACE, child.wait()).await {
-            Ok(status) => status,
-            Err(_) => {
+    let Rules { health, policy, idle } = rules;
+    let status = loop {
+        let wake = proc.idle_wake(idle);
+        tokio::select! {
+            status = child.wait() => break status,
+            () = proc.kill.cancelled() => {
                 let _ = child.kill().await;
-                child.wait().await
+                break child.wait().await;
             }
-        },
+            () = eof.cancelled() => break match timeout(EOF_GRACE, child.wait()).await {
+                Ok(status) => status,
+                Err(_) => {
+                    let _ = child.kill().await;
+                    child.wait().await
+                }
+            },
+            () = sleep_until(wake) => {
+                if !proc.idle_stop(idle) {
+                    continue;
+                }
+                // Closing the input lets a well-behaved script end on its own.
+                proc.close_input.cancel();
+                break match timeout(IDLE_GRACE, child.wait()).await {
+                    Ok(status) => status,
+                    Err(_) => {
+                        let _ = child.kill().await;
+                        child.wait().await
+                    }
+                };
+            }
+        }
     };
     let _ = timeout(STDERR_GRACE, stderr).await;
     // An end nobody asked for is a crash. It is counted before the process counts as gone, so the
@@ -292,6 +351,7 @@ struct Inner {
     spec: OneShot,
     timeout: Duration,
     policy: RestartPolicy,
+    idle: Duration,
     health: Arc<Mutex<Health>>,
     next_id: AtomicU64,
     /// Serializes starting a process.
@@ -326,15 +386,20 @@ impl Session {
     /// A session for `runtime` of the extension called `extension` in `dir`. No process starts
     /// before the first request.
     pub fn new(extension: &str, dir: PathBuf, runtime: &ScriptRuntime) -> Self {
-        Self::from_spec(OneShot::new(extension, dir, runtime), RestartPolicy::default())
+        Self::from_spec(
+            OneShot::new(extension, dir, runtime),
+            RestartPolicy::default(),
+            runtime.idle_timeout(),
+        )
     }
 
-    fn from_spec(spec: OneShot, policy: RestartPolicy) -> Self {
+    fn from_spec(spec: OneShot, policy: RestartPolicy, idle: Duration) -> Self {
         Self {
             inner: Arc::new(Inner {
                 timeout: spec.timeout(),
                 spec,
                 policy,
+                idle,
                 health: Arc::default(),
                 next_id: AtomicU64::new(0),
                 gate: tokio::sync::Mutex::new(()),
@@ -349,13 +414,17 @@ impl Session {
     /// Appends the stderr of the process to `path` (`<data dir>/logs/<extension>.log`).
     #[must_use]
     pub fn with_log(self, path: PathBuf) -> Self {
-        Self::from_spec(OneShot::clone(&self.inner.spec).with_log(path), self.inner.policy)
+        Self::from_spec(
+            OneShot::clone(&self.inner.spec).with_log(path),
+            self.inner.policy,
+            self.inner.idle,
+        )
     }
 
     /// Replaces the default restart policy (three restarts per minute).
     #[must_use]
     pub fn with_restart_policy(self, policy: RestartPolicy) -> Self {
-        Self::from_spec(OneShot::clone(&self.inner.spec), policy)
+        Self::from_spec(OneShot::clone(&self.inner.spec), policy, self.inner.idle)
     }
 
     /// Runs the tasks of the process on the runtime the caller is in. Queries do this on their
@@ -444,6 +513,7 @@ impl Session {
             pending: Mutex::new(Some(HashMap::new())),
             writer,
             kill: CancellationToken::new(),
+            close_input: CancellationToken::new(),
             deliberate: AtomicBool::new(false),
             activity: Mutex::new(Activity { dead: false, in_flight: 0, last: Instant::now() }),
             exit: exit_rx,
@@ -455,7 +525,7 @@ impl Session {
         let stderr = handle.spawn(async move {
             pump_stderr_into(stderr, log, &stderr_last).await;
         });
-        handle.spawn(write_loop(stdin, lines));
+        handle.spawn(write_loop(stdin, lines, proc.close_input.clone()));
         handle.spawn(read_loop(stdout, proc.clone(), eof.clone()));
         handle.spawn(supervise(
             child,
@@ -463,8 +533,11 @@ impl Session {
             eof,
             stderr,
             exit_tx,
-            self.inner.health.clone(),
-            self.inner.policy,
+            Rules {
+                health: self.inner.health.clone(),
+                policy: self.inner.policy,
+                idle: self.inner.idle,
+            },
         ));
         Ok(proc)
     }

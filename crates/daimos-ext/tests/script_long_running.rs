@@ -380,3 +380,52 @@ async fn deliberate_stops_do_not_count_as_crashes() {
     }
     assert_eq!(ext.titles("ok").await.len(), 3);
 }
+
+#[tokio::test]
+async fn an_idle_process_is_stopped_and_the_next_query_starts_it_again() {
+    let python = python_or_skip!();
+    let ext = install(python, "idle_timeout_ms = 400");
+    // No restarts allowed: an idle stop that counted as a crash would fail the session.
+    let session = ext.session.clone().with_restart_policy(quick(0, 60_000));
+    let ext = Installed { session, ..ext };
+    for round in 1..=2 {
+        assert_eq!(ext.titles("a").await.len(), 3);
+        let pid = ext.pid();
+        assert_eq!(ext.starts(), round);
+        if cfg!(unix) {
+            eventually("the idle process to end", || !process_exists(&pid)).await;
+        } else {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+        }
+    }
+    assert_eq!(ext.titles("last").await.len(), 3);
+    assert_eq!(ext.starts(), 3);
+}
+
+#[tokio::test]
+async fn a_request_during_the_idle_time_resets_it() {
+    let python = python_or_skip!();
+    let ext = install(python, "idle_timeout_ms = 1500");
+    assert_eq!(ext.titles("a").await.len(), 3);
+    let pid = ext.pid();
+    // Each wait is shorter than the idle time, together they are longer.
+    for _ in 0..2 {
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(ext.titles("b").await.len(), 3);
+    }
+    assert_eq!(ext.starts(), 1);
+    assert_eq!(ext.pid(), pid);
+    if cfg!(unix) {
+        assert!(process_exists(&pid));
+        eventually("the idle process to end", || !process_exists(&pid)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_request_in_flight_keeps_the_process_alive() {
+    let python = python_or_skip!();
+    let ext = install(python, "idle_timeout_ms = 100\ntimeout_ms = 20000");
+    // The fixture needs 300 ms to answer, three times the idle time.
+    assert_eq!(ext.titles("slow").await, ["slow answer"]);
+    assert_eq!(ext.starts(), 1);
+}

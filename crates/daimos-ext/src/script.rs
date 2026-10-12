@@ -933,8 +933,12 @@ mod tests {
 
     #[test]
     fn the_runner_takes_its_timeout_from_the_manifest() {
-        let runtime =
-            ScriptRuntime { command: vec!["x".into()], long_running: false, timeout_ms: 1234 };
+        let runtime = ScriptRuntime {
+            command: vec!["x".into()],
+            long_running: false,
+            timeout_ms: 1234,
+            idle_timeout_ms: 600_000,
+        };
         let shot = OneShot::new("demo", PathBuf::from("."), &runtime);
         assert_eq!(shot.timeout(), Duration::from_millis(1234));
     }
