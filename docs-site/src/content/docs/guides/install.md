@@ -24,7 +24,7 @@ Each release also has an archive with the `daimos` command for every platform
 ## First start
 
 Press **Alt+Space** (the default hotkey) to open the window. On Wayland the first start asks the
-desktop to confirm the shortcut; see [Wayland setup](../wayland/). The hotkey can be changed in the
+desktop to confirm the shortcut; see [Wayland setup](../../platforms/wayland/). The hotkey can be changed in the
 settings (**Ctrl+,**).
 
 ## Build from source

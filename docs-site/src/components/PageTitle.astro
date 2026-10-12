@@ -1,0 +1,32 @@
+---
+import Default from "@astrojs/starlight/components/PageTitle.astro";
+
+const labels = {
+  "linux-x11": "Linux (X11)",
+  "linux-wayland": "Linux (Wayland)",
+  windows: "Windows",
+  macos: "macOS",
+};
+const { platforms, since } = Astro.locals.starlightRoute.entry.data;
+---
+
+<Default {...Astro.props}><slot /></Default>
+{
+  (platforms || since) && (
+    <p class="page-meta">
+      {platforms && <span>Applies to: {platforms.map((p) => labels[p]).join(", ")}</span>}
+      {since && <span>Since v{since}</span>}
+    </p>
+  )
+}
+
+<style>
+  .page-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1rem;
+    margin-top: 0.5rem;
+    font-size: var(--sl-text-sm);
+    color: var(--sl-color-gray-3);
+  }
+</style>

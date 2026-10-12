@@ -17,7 +17,7 @@ These apply to every issue, including issues created with `gh` or the API (which
 forms). Write them in US English.
 
 - **Labels:** exactly one level label (`epic`, `feature`, `pbi`, `task`, `bug`) and one `area:*`
-  label (`area:core`, `area:platform`, `area:ext`, `area:frontend`, `area:cli`, `area:ci`).
+  label (`area:core`, `area:platform`, `area:ext`, `area:frontend`, `area:cli`, `area:ci`, `area:docs`).
 - **Title:** `[Epic] `, `[Feature] `, `[PBI] `, `[Task] ` or `[Bug] ` matching the level label.
   PBIs and tasks continue with a conventional-commit title: `[PBI] feat: hotkey on Wayland via the
   XDG GlobalShortcuts portal`, `[Task] test: matcher orders exact prefix first`.

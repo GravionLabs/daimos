@@ -1,6 +1,7 @@
 ---
 title: Wayland setup
 description: The global hotkey and the window on Wayland compositors.
+platforms: [linux-wayland]
 ---
 
 Wayland has no global key grab: an application cannot listen for a key combination while another
