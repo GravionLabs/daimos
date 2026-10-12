@@ -96,6 +96,22 @@ Settings you fill in for the extension.
 | `type`     | yes      | `text`, `password` (kept in the OS keyring), `number`, or `checkbox` |
 | `required` | no       | The extension cannot run until it is set (default `false`)           |
 
+## How commands and keywords route queries
+
+Each command is a source of results with the id `<extension name>.<command name>`, for example
+`github-repos.search`.
+
+- A query whose first word is one of the command's `keywords`, followed by a space, goes to that
+  command only. `gh daimos` sends `daimos` to every command that lists `gh`. Keywords ignore case.
+- Any other query goes to all commands and to the built-in sources, and the results are ranked
+  together.
+- A command without keywords is only reached by the second case.
+- Every result from an extension carries the extension's `title` as a label, so you can see where
+  it came from.
+
+The script and wasm runtimes that answer the queries are still in development, so a loaded command
+returns no results yet.
+
 ## Validation
 
 Daimos checks the manifest when it loads the extension. An extension with a problem is disabled and

@@ -182,7 +182,7 @@ impl QueryEngine {
             let routed: Vec<_> = self
                 .providers
                 .iter()
-                .filter(|p| p.keyword().is_some_and(|k| k.to_lowercase() == keyword))
+                .filter(|p| p.keywords().iter().any(|k| k.to_lowercase() == keyword))
                 .cloned()
                 .collect();
             if !routed.is_empty() {
@@ -400,6 +400,38 @@ mod tests {
         assert!(batches.iter().all(|b| b.provider == "gh"));
         assert_eq!(batches[0].items[0].title, "my repo");
         assert!(tokio::time::timeout(Duration::from_millis(100), rx.recv()).await.is_err());
+    }
+
+    /// A provider that answers to several keywords.
+    struct MultiKeyword;
+
+    impl Provider for MultiKeyword {
+        fn id(&self) -> &str {
+            "multi"
+        }
+        fn keywords(&self) -> Vec<&str> {
+            vec!["gh", "repo"]
+        }
+        fn query(&self, ctx: QueryContext) -> BoxStream<'static, ItemBatch> {
+            stream::once(async move { ItemBatch::from(vec![Item::new("m", ctx.text)]) }).boxed()
+        }
+    }
+
+    #[tokio::test]
+    async fn every_keyword_of_a_provider_routes_to_it() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let sink: Sink = Arc::new(move |b| {
+            let _ = tx.send(b);
+        });
+        let providers: Vec<Arc<dyn Provider>> =
+            vec![Arc::new(MultiKeyword), Arc::new(Fake::new("apps", vec![vec!["a"]]))];
+        let engine = QueryEngine::new(providers, sink, Handle::current());
+        for keyword in ["gh", "REPO"] {
+            engine.query(1, &format!("{keyword} thing"));
+            let batches = until_done(&mut rx, 1).await;
+            assert!(batches.iter().all(|b| b.provider == "multi"), "{keyword}");
+            assert_eq!(batches[0].items[0].title, "thing");
+        }
     }
 
     #[tokio::test]

@@ -8,7 +8,9 @@ publish.workspace = true
 repository.workspace = true
 
 [dependencies]
+daimos-core = { version = "0.1.0", path = "../daimos-core" }
 dirs = "7.0.0"
+futures = "0.3.34"
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.1.8"
 
@@ -17,3 +19,4 @@ workspace = true
 
 [dev-dependencies]
 tempfile = "3.27.0"
+tokio-util = "0.7.20"
