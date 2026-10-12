@@ -7,8 +7,9 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::consent::{self, ConsentRecord};
 use crate::error::ManifestError;
-use crate::manifest::Manifest;
+use crate::manifest::{Capabilities, Manifest};
 
 /// The file that makes a directory an extension.
 pub const MANIFEST_FILE: &str = "extension.toml";
@@ -35,6 +36,16 @@ pub struct LoadedExtension {
     /// The extension's own directory.
     pub dir: PathBuf,
     pub manifest: Manifest,
+    /// What the user confirmed, `None` before the first confirmation.
+    pub consent: Option<ConsentRecord>,
+}
+
+impl LoadedExtension {
+    /// The capabilities that still wait for a confirmation: everything before the first one, then
+    /// what an update added. `None` when the extension may run.
+    pub fn pending(&self) -> Option<Capabilities> {
+        consent::pending(&self.manifest, self.consent.as_ref())
+    }
 }
 
 /// Why an extension did not load.
@@ -71,13 +82,14 @@ pub struct Scan {
     pub failed: Vec<FailedExtension>,
 }
 
-/// Loads the extension in `dir`, which must contain `extension.toml`.
+/// Loads the extension in `dir`, which must contain `extension.toml`. The result carries the
+/// consent, so the caller can tell whether it may run ([`LoadedExtension::pending`]).
 pub fn load_extension(dir: &Path) -> Result<LoadedExtension, LoadError> {
     let file = dir.join(MANIFEST_FILE);
     let source = std::fs::read_to_string(&file)
         .map_err(|error| LoadError::Other { file: file.clone(), message: error.to_string() })?;
     let manifest = Manifest::parse(&source, &file).map_err(LoadError::Manifest)?;
-    Ok(LoadedExtension { dir: dir.to_path_buf(), manifest })
+    Ok(LoadedExtension { dir: dir.to_path_buf(), manifest, consent: consent::read(dir) })
 }
 
 /// Loads every `<name>/extension.toml` below `root`, in directory-name order. Entries that are not
@@ -186,6 +198,18 @@ mod tests {
         assert_eq!(failed, ["broken", "invalid"]);
         assert!(scan.failed[0].error.to_string().contains("extension.toml:2"), "{:?}", scan.failed);
         assert!(scan.failed[1].error.to_string().contains("extension.name"), "{:?}", scan.failed);
+    }
+
+    #[test]
+    fn scan_reports_what_waits_for_a_confirmation() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "new", MANIFEST_FILE, &manifest("new"));
+        write(root.path(), "known", MANIFEST_FILE, &manifest("known"));
+        consent::confirm(&root.path().join("known")).unwrap();
+        let scan = scan(root.path());
+        assert_eq!(scan.loaded[0].manifest.extension.name, "known");
+        assert_eq!(scan.loaded[0].pending(), None);
+        assert_eq!(scan.loaded[1].pending(), Some(Capabilities::default()));
     }
 
     #[test]

@@ -92,6 +92,12 @@ impl ExtensionHost {
                     self.fail(key, message);
                     return;
                 }
+                if extension.pending().is_some() {
+                    log::info!("extension {key} waits for the confirmation of its capabilities");
+                    self.registry
+                        .replace(ExtensionRecord::needs_confirmation(key, manifest), Vec::new());
+                    return;
+                }
                 self.backend.load(&extension);
                 let providers = providers_for(manifest, &self.backend);
                 self.registry.replace(ExtensionRecord::enabled(key, manifest), providers);
@@ -243,9 +249,23 @@ mod tests {
         )
     }
 
+    /// Writes a manifest and confirms the (empty) capabilities, so the extension may run.
     fn write(root: &Path, key: &str, content: &str) {
+        write_unconfirmed(root, key, content);
+        std::fs::write(
+            root.join(key).join(crate::consent::CONSENT_FILE),
+            r#"{"version":"1.0.0","capabilities":{}}"#,
+        )
+        .unwrap();
+    }
+
+    fn write_unconfirmed(root: &Path, key: &str, content: &str) {
         std::fs::create_dir_all(root.join(key)).unwrap();
         std::fs::write(root.join(key).join(MANIFEST_FILE), content).unwrap();
+    }
+
+    fn with_capabilities(manifest: &str, capabilities: &str) -> String {
+        format!("{manifest}\n[capabilities]\n{capabilities}\n")
     }
 
     fn host(root: &Path) -> Arc<ExtensionHost> {
@@ -347,6 +367,90 @@ mod tests {
     }
 
     #[test]
+    fn an_extension_without_consent_waits_and_runs_nothing() {
+        let root = tempfile::tempdir().unwrap();
+        write_unconfirmed(root.path(), "ext", &manifest("ext", "k"));
+        let host = host(root.path());
+        host.reload_all();
+        let registry = host.registry();
+        let record = registry.record("ext").unwrap();
+        assert_eq!(record.state, ExtensionState::NeedsConfirmation);
+        assert_eq!(record.state.label(), "needs-confirmation");
+        assert!(registry.providers_of("ext").is_empty());
+
+        crate::consent::confirm(&root.path().join("ext")).unwrap();
+        host.reload("ext");
+        assert_eq!(registry.record("ext").unwrap().state, ExtensionState::Enabled);
+        assert_eq!(keywords_of(registry, "ext"), ["k"]);
+    }
+
+    #[test]
+    fn an_update_that_adds_a_capability_is_disabled_until_confirmed_again() {
+        let root = tempfile::tempdir().unwrap();
+        let base = manifest("ext", "k");
+        let first = with_capabilities(
+            &base,
+            "network = [\"a.com\"]\nfilesystem = [\"/x:ro\"]\nkeyring = [\"t\"]",
+        );
+        write_unconfirmed(root.path(), "ext", &first);
+        crate::consent::confirm(&root.path().join("ext")).unwrap();
+        let host = host(root.path());
+        host.reload_all();
+        let registry = host.registry();
+        assert_eq!(registry.record("ext").unwrap().state, ExtensionState::Enabled);
+
+        // Each addition alone puts the extension back to pending; confirming enables it again.
+        for added in [
+            "network = [\"a.com\", \"b.com\"]\nfilesystem = [\"/x:ro\"]\nkeyring = [\"t\"]",
+            "network = [\"a.com\"]\nfilesystem = [\"/x:ro\", \"/y:ro\"]\nkeyring = [\"t\"]",
+            "network = [\"a.com\"]\nfilesystem = [\"/x:rw\"]\nkeyring = [\"t\"]",
+            "network = [\"a.com\"]\nfilesystem = [\"/x:ro\"]\nkeyring = [\"t\", \"u\"]",
+            "network = [\"a.com\"]\nfilesystem = [\"/x:ro\"]\nkeyring = [\"t\"]\nclipboard = \"read\"",
+        ] {
+            write_unconfirmed(root.path(), "ext", &with_capabilities(&base, added));
+            host.reload("ext");
+            assert_eq!(
+                registry.record("ext").unwrap().state,
+                ExtensionState::NeedsConfirmation,
+                "{added}"
+            );
+            assert!(registry.providers_of("ext").is_empty());
+            crate::consent::confirm(&root.path().join("ext")).unwrap();
+            host.reload("ext");
+            assert_eq!(registry.record("ext").unwrap().state, ExtensionState::Enabled, "{added}");
+            // Back to the first set, which only removes: still enabled.
+            write_unconfirmed(root.path(), "ext", &first);
+            host.reload("ext");
+            assert_eq!(registry.record("ext").unwrap().state, ExtensionState::Enabled);
+            crate::consent::confirm(&root.path().join("ext")).unwrap();
+        }
+    }
+
+    #[test]
+    fn an_update_that_only_removes_a_capability_stays_enabled() {
+        let root = tempfile::tempdir().unwrap();
+        let base = manifest("ext", "k");
+        write_unconfirmed(
+            root.path(),
+            "ext",
+            &with_capabilities(
+                &base,
+                "network = [\"a.com\", \"b.com\"]\nclipboard = \"read-write\"",
+            ),
+        );
+        crate::consent::confirm(&root.path().join("ext")).unwrap();
+        let host = host(root.path());
+        host.reload_all();
+        write_unconfirmed(
+            root.path(),
+            "ext",
+            &with_capabilities(&base, "network = [\"a.com\"]\nclipboard = \"read\""),
+        );
+        host.reload("ext");
+        assert_eq!(host.registry().record("ext").unwrap().state, ExtensionState::Enabled);
+    }
+
+    #[test]
     fn a_deleted_extension_is_removed() {
         let root = tempfile::tempdir().unwrap();
         write(root.path(), "ext", &manifest("ext", "k"));
@@ -415,6 +519,16 @@ mod tests {
 
         write(root.path(), "added", &manifest("added", "a"));
         eventually("a new extension", || registry.record("added").is_some());
+
+        // A new version that asks for more is held back, and confirming releases it, both seen by
+        // the watcher alone.
+        let wider = with_capabilities(&manifest("ext", "wide"), "network = [\"b.com\"]");
+        write_unconfirmed(root.path(), "ext", &wider);
+        eventually("the pending state", || {
+            registry.record("ext").map(|r| r.state) == Some(ExtensionState::NeedsConfirmation)
+        });
+        crate::consent::confirm(&root.path().join("ext")).unwrap();
+        eventually("the confirmed extension", || keywords_of(&registry, "ext") == ["wide"]);
         watcher.stop();
     }
 

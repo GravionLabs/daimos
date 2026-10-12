@@ -974,6 +974,7 @@ mod tests {
              long_running = {long_running}\n"
         );
         std::fs::write(dir.join("extension.toml"), manifest).unwrap();
+        crate::consent::confirm(&dir).unwrap();
         dir::load_extension(&dir).unwrap()
     }
 

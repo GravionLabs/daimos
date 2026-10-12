@@ -12,6 +12,9 @@ use crate::manifest::{Manifest, Runtime};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtensionState {
     Enabled,
+    /// Not running until the user confirms its capabilities, the first time or after an update
+    /// that added one.
+    NeedsConfirmation,
     /// Disabled because it failed to load; carries the message shown to the user.
     Error(String),
 }
@@ -21,6 +24,7 @@ impl ExtensionState {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Enabled => "enabled",
+            Self::NeedsConfirmation => "needs-confirmation",
             Self::Error(_) => "error",
         }
     }
@@ -47,6 +51,11 @@ impl ExtensionRecord {
             runtime: Some(manifest.extension.runtime),
             state: ExtensionState::Enabled,
         }
+    }
+
+    /// An extension that waits for the user to confirm its capabilities.
+    pub fn needs_confirmation(key: &str, manifest: &Manifest) -> Self {
+        Self { state: ExtensionState::NeedsConfirmation, ..Self::enabled(key, manifest) }
     }
 
     pub fn failed(key: &str, message: String) -> Self {
@@ -124,7 +133,7 @@ impl Registry {
                 state: record.state.label().to_owned(),
                 message: match record.state {
                     ExtensionState::Error(message) => Some(message),
-                    ExtensionState::Enabled => None,
+                    ExtensionState::Enabled | ExtensionState::NeedsConfirmation => None,
                 },
             })
             .collect();

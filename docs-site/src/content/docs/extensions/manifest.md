@@ -87,6 +87,18 @@ extensions, which run with your rights.
 | `clipboard`  | `read`, `write`, or `read-write`                                 |
 | `keyring`    | Names of secrets it may read from the OS keyring                 |
 
+### Confirmation and updates
+
+An extension does not run until you confirm its capabilities. Daimos stores what you confirmed, with
+the version, in `.consent.json` inside the extension folder, outside the manifest. Until then the
+extension is listed as `needs-confirmation`, runs nothing, and shows no results.
+
+When a new version of the manifest asks for more than you confirmed, the extension is disabled again
+until you confirm the new set. These count as more: a new network host, a new path, a path with a
+wider mode (`:rw` where you confirmed `:ro`; a path without a suffix counts as `:ro`), wider
+clipboard access, and a new keyring entry. A new version that only removes capabilities keeps
+running, and so does an edit that changes nothing in `[capabilities]`.
+
 ## `[[preferences]]`
 
 Settings you fill in for the extension.

@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::{self, Locator, ManifestError, Step};
 
@@ -102,7 +102,7 @@ pub struct RuntimeTables {
     pub wasm: Option<WasmRuntime>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ClipboardAccess {
     Read,
@@ -110,8 +110,37 @@ pub enum ClipboardAccess {
     ReadWrite,
 }
 
+impl ClipboardAccess {
+    /// Whether this access reads, and whether it writes.
+    fn flags(self) -> (bool, bool) {
+        match self {
+            Self::Read => (true, false),
+            Self::Write => (false, true),
+            Self::ReadWrite => (true, true),
+        }
+    }
+
+    fn from_flags(read: bool, write: bool) -> Option<Self> {
+        match (read, write) {
+            (false, false) => None,
+            (true, false) => Some(Self::Read),
+            (false, true) => Some(Self::Write),
+            (true, true) => Some(Self::ReadWrite),
+        }
+    }
+}
+
+/// How a `filesystem` entry (`<path>` or `<path>:ro|rw`) reaches a path; no suffix means `ro`.
+fn split_filesystem(entry: &str) -> (&str, bool) {
+    match entry.rsplit_once(':') {
+        Some((path, "rw")) => (path, true),
+        Some((path, "ro")) => (path, false),
+        _ => (entry, false),
+    }
+}
+
 /// The `[capabilities]` table: enforced for wasm, displayed for script.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Capabilities {
     #[serde(default)]
@@ -132,6 +161,45 @@ pub enum PreferenceKind {
     Password,
     Number,
     Checkbox,
+}
+
+impl Capabilities {
+    /// Whether nothing is declared.
+    pub fn is_empty(&self) -> bool {
+        self.network.is_empty()
+            && self.filesystem.is_empty()
+            && self.clipboard.is_none()
+            && self.keyring.is_empty()
+    }
+
+    /// What `self` asks for beyond `confirmed`: new hosts, new paths or a path with a wider mode,
+    /// wider clipboard access and new keyring entries. Dropping a capability adds nothing.
+    pub fn diff(&self, confirmed: &Capabilities) -> Capabilities {
+        let new = |mine: &[String], theirs: &[String]| -> Vec<String> {
+            mine.iter().filter(|entry| !theirs.contains(entry)).cloned().collect()
+        };
+        let filesystem = self
+            .filesystem
+            .iter()
+            .filter(|entry| {
+                let (path, write) = split_filesystem(entry);
+                !confirmed.filesystem.iter().any(|known| {
+                    let (known_path, known_write) = split_filesystem(known);
+                    known_path == path && (known_write || !write)
+                })
+            })
+            .cloned()
+            .collect();
+        let (read, write) = self.clipboard.map_or((false, false), ClipboardAccess::flags);
+        let (known_read, known_write) =
+            confirmed.clipboard.map_or((false, false), ClipboardAccess::flags);
+        Capabilities {
+            network: new(&self.network, &confirmed.network),
+            filesystem,
+            clipboard: ClipboardAccess::from_flags(read && !known_read, write && !known_write),
+            keyring: new(&self.keyring, &confirmed.keyring),
+        }
+    }
 }
 
 /// One `[[preferences]]` entry.
