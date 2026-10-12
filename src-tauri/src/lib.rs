@@ -132,6 +132,21 @@ fn setup_extensions(app: &tauri::App) {
             ScriptBackend::new()
         }
     };
+    // Preference values: text in the settings database, passwords in the OS keyring.
+    let backend = match app.path().app_config_dir() {
+        Ok(config_dir) => {
+            let preferences = Arc::new(daimos_ext::Preferences::new(
+                SettingsStore::new(config_dir),
+                Arc::new(daimos_ext::OsSecretStore),
+            ));
+            app.manage(Arc::clone(&preferences));
+            backend.with_preferences(preferences)
+        }
+        Err(error) => {
+            log::warn!("no config directory, extension preferences are off: {error}");
+            backend
+        }
+    };
     let host = Arc::new(ExtensionHost::new(root, Arc::new(backend), registry));
     match host.watch(std::time::Duration::from_millis(250)) {
         Ok(watcher) => {

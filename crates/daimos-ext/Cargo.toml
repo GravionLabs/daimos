@@ -11,6 +11,7 @@ repository.workspace = true
 daimos-core = { version = "0.1.0", path = "../daimos-core" }
 dirs = "7.0.0"
 futures = "0.3.34"
+keyring = "4.2.0"
 log = "0.4.34"
 notify = "8.2.0"
 serde = { version = "1.0.229", features = ["derive"] }

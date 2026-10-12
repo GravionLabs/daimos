@@ -110,6 +110,22 @@ Settings you fill in for the extension.
 | `type`     | yes      | `text`, `password` (kept in the OS keyring), `number`, or `checkbox` |
 | `required` | no       | The extension cannot run until it is set (default `false`)           |
 
+### Where the values are stored
+
+You set the values in the settings. `text`, `number`, and `checkbox` values are stored in Daimos's
+settings database. `password` values never go there: they are stored in the OS keyring, with the
+service `daimos` and the user `<extension name>/<preference name>` (for example
+`github-repos/token`), and read from it each time a query runs. They do not appear in logs or in
+`daimos ext list`.
+
+- **Linux** needs a running Secret Service, such as GNOME Keyring or KWallet. Without one, a
+  required password preference makes the extension answer with a message that the OS keyring is not
+  available; start the service and set the value again.
+- **Windows** uses the Credential Manager and **macOS** uses the Keychain.
+
+A required preference without a value stops the extension from running: its result names the
+missing preference.
+
 ## How commands and keywords route queries
 
 Each command is a source of results with the id `<extension name>.<command name>`, for example
