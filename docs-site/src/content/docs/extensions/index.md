@@ -64,4 +64,4 @@ list` shows the state of every extension, see the [manifest reference](manifest/
 
 - [Manifest reference](manifest/): the sections and fields of `extension.toml`.
 - [Script extensions](scripts/): write an extension as a script that speaks JSON Lines.
-- [Extension commands](cli/): `daimos ext list` shows the installed extensions and their state.
+- [Extension commands](cli/): `daimos ext install`, `confirm` and `list`.
