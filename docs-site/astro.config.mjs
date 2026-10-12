@@ -37,7 +37,13 @@ export default defineConfig({
             { label: "Command line", slug: "reference/cli" },
           ],
         },
-        { label: "Extensions", items: [{ label: "Overview", slug: "extensions" }] },
+        {
+          label: "Extensions",
+          items: [
+            { label: "Overview", slug: "extensions" },
+            { label: "Manifest", slug: "extensions/manifest" },
+          ],
+        },
         { label: "Contributing", items: [{ label: "Overview", slug: "contributing" }] },
       ],
     }),
