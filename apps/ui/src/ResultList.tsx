@@ -1,6 +1,6 @@
 import { createEffect, createSignal, For, Show } from "solid-js";
 import type { Icon, Item } from "./bindings";
-import { highlightRuns, VIEWPORT_ROWS } from "./results";
+import { highlightRuns, runsUnsandboxed, UNSANDBOXED_LABEL, VIEWPORT_ROWS } from "./results";
 
 /** Height of one row in CSS pixels; the window height in Rust (`RESULT_ROW_HEIGHT`) must match. */
 export const ROW_HEIGHT = 52;
@@ -98,6 +98,11 @@ export function ResultList(props: {
                     <span class="subtitle">{item.subtitle}</span>
                   </Show>
                 </span>
+                <Show when={runsUnsandboxed(item)}>
+                  <span class="badge" data-sandboxed="false">
+                    {UNSANDBOXED_LABEL}
+                  </span>
+                </Show>
                 <For each={item.accessories}>
                   {(accessory) => <span class="accessory">{accessory}</span>}
                 </For>

@@ -39,6 +39,18 @@ Folders without an `extension.toml`, files, and folders whose name starts with a
 A broken extension does not stop the others from loading. Two extensions cannot share a name: the
 second one (in folder-name order) is reported as an error.
 
+## Script extensions run unsandboxed
+
+A script extension is a program that runs with your rights. It can do anything you can do, so
+Daimos says so wherever its results appear: each result of a script extension carries the badge
+`Runs unsandboxed` in the list and in the header of the detail pane, and the extension has the same
+label in the settings. Wasm extensions are sandboxed and can only use the capabilities they
+declare; they show no badge on results, and `Sandboxed` in the settings.
+
+Before an extension runs for the first time, and again when an update asks for more, you confirm its
+capabilities, see [confirmation and updates](manifest/#confirmation-and-updates) and
+[`daimos ext install`](cli/#install-an-extension).
+
 ## Hot reload
 
 Daimos watches the extension directory. When you save a file in an extension folder, add a folder,

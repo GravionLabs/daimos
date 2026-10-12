@@ -591,3 +591,11 @@ input[type="radio"] {
   color: var(--muted);
   font-size: 0.75rem;
 }
+
+.row .badge {
+  flex: none;
+}
+
+.detail-header {
+  margin: 0 0 8px;
+}

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@solidjs/testing-library";
+import { fireEvent, render, screen, waitFor, within } from "@solidjs/testing-library";
 import { App } from "./App";
 import type { Action, Item } from "./bindings";
 import { batch, fakeHost, item } from "./test-host";
@@ -343,5 +343,54 @@ describe("shortcuts of actions and refreshing after a change", () => {
     vi.mocked(host.runAction).mockRejectedValueOnce("no action pin");
     fireEvent.keyDown(box, { key: "p", ctrlKey: true });
     expect(await screen.findByText("no action pin")).toBeInTheDocument();
+  });
+});
+
+describe("the unsandboxed badge", () => {
+  function rows(...items: Item[]) {
+    const fake = fakeHost();
+    render(() => <App host={fake.host} />);
+    fake.send(batch(0, items));
+    return { ...fake, box: screen.getByRole("searchbox") };
+  }
+  const row = (title: string) => {
+    const found = screen
+      .getAllByRole("option")
+      .find((option) => option.querySelector(".title")?.textContent === title);
+    if (!found) throw new Error(`no row ${title}`);
+    return found;
+  };
+
+  it("marks the results of a script extension, and only those", () => {
+    rows(
+      item("script", { sandboxed: false }),
+      item("wasm", { sandboxed: true }),
+      item("builtin"),
+      item("builtin-null", { sandboxed: null }),
+    );
+    expect(within(row("script")).getByText("Runs unsandboxed")).toBeInTheDocument();
+    for (const title of ["wasm", "builtin", "builtin-null"]) {
+      expect(within(row(title)).queryByText("Runs unsandboxed")).toBeNull();
+    }
+    expect(screen.getAllByText("Runs unsandboxed")).toHaveLength(1);
+  });
+
+  it("is text in the row, readable without color", () => {
+    rows(item("script", { sandboxed: false, accessories: ["Notes"] }));
+    const option = row("script");
+    expect(option).toHaveTextContent("Runs unsandboxed");
+    expect(option).toHaveTextContent("Notes");
+  });
+
+  it("shows in the header of the detail pane of the selected script result", () => {
+    const { box } = rows(
+      item("script", { sandboxed: false, detail: { type: "markdown", text: "Hi" } }),
+      item("plain", { detail: { type: "markdown", text: "Hi" } }),
+    );
+    fireEvent.keyDown(box, { key: "Tab" });
+    const pane = screen.getByLabelText("Detail");
+    expect(within(pane).getByText("Runs unsandboxed")).toBeInTheDocument();
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    expect(within(screen.getByLabelText("Detail")).queryByText("Runs unsandboxed")).toBeNull();
   });
 });
