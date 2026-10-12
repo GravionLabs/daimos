@@ -6,6 +6,7 @@ pub mod manifest;
 pub mod protocol;
 pub mod provider;
 pub mod registry;
+pub mod script;
 pub mod watch;
 
 pub use error::ManifestError;

@@ -27,7 +27,7 @@ pub enum ActionKind {
     Run,
     Push,
     Form,
-    /// Handled by the extension that owns the item.
+    // Handled by the extension that owns the item.
     Custom,
 }
 
