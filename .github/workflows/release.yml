@@ -29,6 +29,8 @@ jobs:
     uses: GravionLabs/ci/.github/workflows/tauri-app.yml@main
     permissions:
       contents: write
+      issues: write
+      pull-requests: read
     with:
       # The shared checks job has no GTK and WebKit libraries: it skips the crates that need them
       # (the app, and the platform crate that depends on tauri). ci.yml covers both on every pull request.
