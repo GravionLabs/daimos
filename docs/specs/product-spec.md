@@ -109,7 +109,7 @@ flowchart TD
 | Process cold start to hotkey ready    | < 500 ms | Process start to hotkey registration                                        |
 | Memory, idle (app + web view)         | < 150 MB | PSS on Linux, footprint on macOS, private working set on Windows; never RSS |
 | Wasm extension call                   | < 5 ms   | Benchmark against the example extension                                     |
-| Script extension call (warm process)  | < 30 ms  | Benchmark against the example extension                                     |
+| Script extension call (warm process)  | < 30 ms  | Benchmark in `daimos-ext` with the Python fixture, CI regression check      |
 
 The budget is enforced from M1 with a benchmark harness; a feature that breaks it does not ship.
 

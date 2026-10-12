@@ -1136,6 +1136,7 @@ dependencies = [
 name = "daimos-ext"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "daimos-core",
  "dirs 7.0.0",
  "futures",

@@ -24,5 +24,10 @@ toml = "1.1.8"
 [lints]
 workspace = true
 
+[[bench]]
+name = "script_warm"
+harness = false
+
 [dev-dependencies]
+criterion = "0.8.2"
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "sync", "time", "macros", "test-util"] }
