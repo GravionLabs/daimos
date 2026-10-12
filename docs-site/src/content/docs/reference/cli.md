@@ -14,4 +14,4 @@ description: Control the running Daimos with the daimos command.
 | `daimos index …`            | Work with the application index.                              |
 
 Run `daimos --help` for the options of each command. `daimos toggle` is how you bind Daimos to a key
-on compositors without the GlobalShortcuts portal, see [Wayland setup](../../guides/wayland/).
+on compositors without the GlobalShortcuts portal, see [Wayland setup](../../platforms/wayland/).
