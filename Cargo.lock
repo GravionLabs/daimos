@@ -1039,7 +1039,9 @@ dependencies = [
 name = "daimos-ext"
 version = "0.1.0"
 dependencies = [
+ "dirs 7.0.0",
  "serde",
+ "tempfile",
  "toml 1.1.8+spec-1.1.0",
 ]
 
