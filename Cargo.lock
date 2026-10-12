@@ -987,6 +987,7 @@ name = "daimos-app"
 version = "0.1.0"
 dependencies = [
  "daimos-core",
+ "daimos-ext",
  "daimos-platform",
  "log",
  "serde",
@@ -1038,6 +1039,18 @@ dependencies = [
 [[package]]
 name = "daimos-ext"
 version = "0.1.0"
+dependencies = [
+ "daimos-core",
+ "dirs 7.0.0",
+ "futures",
+ "log",
+ "notify",
+ "serde",
+ "tempfile",
+ "tokio",
+ "tokio-util",
+ "toml 1.1.8+spec-1.1.0",
+]
 
 [[package]]
 name = "daimos-platform"

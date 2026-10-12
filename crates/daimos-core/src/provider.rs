@@ -35,6 +35,11 @@ pub trait Provider: Send + Sync {
         None
     }
 
+    /// Every prefix that routes a query to this provider only. Defaults to [`keyword`](Self::keyword).
+    fn keywords(&self) -> Vec<&str> {
+        self.keyword().into_iter().collect()
+    }
+
     /// Blends into the ranking (1.0 is neutral).
     fn weight(&self) -> f32 {
         1.0

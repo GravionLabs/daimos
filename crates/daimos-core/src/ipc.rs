@@ -29,6 +29,31 @@ pub enum Request {
     /// Scan every application source now and wait for the result.
     IndexRebuild,
     IndexStatus,
+    /// List the extensions with their state.
+    ExtList,
+}
+
+/// One extension in the answer to `ext_list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtensionInfo {
+    pub name: String,
+    /// `None` when the manifest could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// `script` or `wasm`; `None` when the manifest could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    /// `enabled` or `error`.
+    pub state: String,
+    /// Why the extension is disabled, when `state` is `error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// The answer to `ext_list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtensionList {
+    pub extensions: Vec<ExtensionInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +65,8 @@ pub enum Response {
     },
     /// The answer to `index_rebuild` and `index_status`.
     Index(crate::index::IndexStatus),
+    /// The answer to `ext_list`.
+    Extensions(ExtensionList),
 }
 
 /// Where the socket lives.
@@ -293,6 +320,40 @@ mod tests {
         let json = serde_json::to_string(&Response::Index(status.clone())).unwrap();
         assert!(json.starts_with(r#"{"status":"index","apps":3"#), "{json}");
         assert_eq!(serde_json::from_str::<Response>(&json).unwrap(), Response::Index(status));
+    }
+
+    #[test]
+    fn the_extension_list_round_trips() {
+        assert_eq!(serde_json::to_string(&Request::ExtList).unwrap(), r#"{"cmd":"ext_list"}"#);
+        assert_eq!(
+            serde_json::from_str::<Request>(r#"{"cmd":"ext_list"}"#).unwrap(),
+            Request::ExtList
+        );
+        let list = ExtensionList {
+            extensions: vec![
+                ExtensionInfo {
+                    name: "notes".into(),
+                    version: Some("0.1.0".into()),
+                    runtime: Some("script".into()),
+                    state: "enabled".into(),
+                    message: None,
+                },
+                ExtensionInfo {
+                    name: "broken".into(),
+                    version: None,
+                    runtime: None,
+                    state: "error".into(),
+                    message: Some("extension.toml:2: bad".into()),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&Response::Extensions(list.clone())).unwrap();
+        assert!(
+            json.starts_with(r#"{"status":"extensions","extensions":[{"name":"notes""#),
+            "{json}"
+        );
+        assert!(!json.contains("null"), "{json}");
+        assert_eq!(serde_json::from_str::<Response>(&json).unwrap(), Response::Extensions(list));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The resident process side of `daimos toggle | show | hide | quit`.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use daimos_core::ipc::{Endpoint, Request, Response, Server};
 use tauri::{AppHandle, Manager, Wry};
@@ -63,6 +63,12 @@ fn handle_request(app: &AppHandle<Wry>, request: Request) -> Response {
                 None => {
                     Response::Error { message: "the application index is not available".into() }
                 }
+            };
+        }
+        Request::ExtList => {
+            return match app.try_state::<Arc<daimos_ext::Registry>>() {
+                Some(registry) => Response::Extensions(registry.ipc_list()),
+                None => Response::Error { message: "the extensions are not available".into() },
             };
         }
     }
