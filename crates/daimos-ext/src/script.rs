@@ -49,6 +49,9 @@ pub enum Failure {
     Exit { code: Option<i32>, stderr: Option<String> },
     /// The process wrote something that is not a protocol message.
     Protocol(String),
+    /// A long-running process crashed more often than it may be restarted; carries the last
+    /// stderr line of the last crash. The extension stays failed until it is reloaded.
+    KeepsCrashing(Option<String>),
 }
 
 /// What a running query reports.
@@ -69,6 +72,8 @@ impl Failure {
             Self::Exit { stderr: Some(line), .. } => line.clone(),
             Self::Exit { code: Some(code), .. } => format!("exited with code {code}"),
             Self::Exit { code: None, .. } => "was stopped before it finished".to_owned(),
+            Self::KeepsCrashing(Some(line)) => line.clone(),
+            Self::KeepsCrashing(None) => "restart limit reached; reload the extensions".to_owned(),
         }
     }
 }
@@ -487,6 +492,7 @@ pub(crate) fn batches(
 pub fn failure_item(extension: &str, failure: &Failure) -> model::Item {
     let title = match failure {
         Failure::Timeout(_) => format!("{extension} took too long"),
+        Failure::KeepsCrashing(_) => format!("{extension} keeps crashing"),
         _ => format!("{extension} failed"),
     };
     crate::provider::error_item(

@@ -6,7 +6,7 @@
 //! late answers are dropped. The tasks of a process run on a tokio runtime that outlives the
 //! requests (see [`Session::bind_current`]).
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
@@ -45,6 +45,57 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 #[derive(Debug, Clone, Copy)]
 struct Exit {
     code: Option<i32>,
+}
+
+/// When a crashed process is started again and when the session gives up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RestartPolicy {
+    /// How many restarts are allowed within `window`; the crash after that fails the session.
+    pub max_restarts: usize,
+    /// The rolling period the restarts are counted in.
+    pub window: Duration,
+    /// The wait before the first restart; it doubles with every crash within the window.
+    pub backoff: Duration,
+}
+
+impl Default for RestartPolicy {
+    /// Three restarts per rolling minute, after 250 ms, 500 ms and 1 s.
+    fn default() -> Self {
+        Self {
+            max_restarts: 3,
+            window: Duration::from_secs(60),
+            backoff: Duration::from_millis(250),
+        }
+    }
+}
+
+/// The crashes of a session and what follows from them.
+#[derive(Debug, Default)]
+struct Health {
+    /// When the process crashed, within the window.
+    crashes: VecDeque<Instant>,
+    /// The session gave up; carries the last stderr line of the last crash.
+    failed: Option<Option<String>>,
+    /// The earliest instant the next process may start.
+    restart_at: Option<Instant>,
+}
+
+impl Health {
+    /// Counts a crash at `now`: the crash after `max_restarts` fails the session, any other one
+    /// delays the next start by `backoff` doubled once per crash within the window.
+    fn record_crash(&mut self, policy: &RestartPolicy, now: Instant, stderr: Option<String>) {
+        while self.crashes.front().is_some_and(|&at| now.duration_since(at) >= policy.window) {
+            self.crashes.pop_front();
+        }
+        self.crashes.push_back(now);
+        if self.crashes.len() > policy.max_restarts {
+            self.failed = Some(stderr);
+            return;
+        }
+        let doublings = u32::try_from(self.crashes.len() - 1).unwrap_or(u32::MAX);
+        self.restart_at =
+            Some(now + policy.backoff.saturating_mul(2_u32.saturating_pow(doublings)));
+    }
 }
 
 /// The requests that wait for an answer, by id; `None` once the output of the process has ended.
@@ -188,6 +239,8 @@ async fn supervise(
     eof: CancellationToken,
     stderr: JoinHandle<()>,
     exit: watch::Sender<Option<Exit>>,
+    health: Arc<Mutex<Health>>,
+    policy: RestartPolicy,
 ) {
     let status = tokio::select! {
         status = child.wait() => status,
@@ -203,9 +256,15 @@ async fn supervise(
             }
         },
     };
+    let _ = timeout(STDERR_GRACE, stderr).await;
+    // An end nobody asked for is a crash. It is counted before the process counts as gone, so the
+    // next request finds the backoff or the failed state.
+    if !proc.deliberate.load(Ordering::SeqCst) {
+        let last = lock(&proc.stderr_last).clone();
+        lock(&health).record_crash(&policy, Instant::now(), last);
+    }
     lock(&proc.activity).dead = true;
     proc.close_pending();
-    let _ = timeout(STDERR_GRACE, stderr).await;
     let code = status.ok().and_then(|status| status.code());
     let _ = exit.send(Some(Exit { code }));
 }
@@ -232,6 +291,8 @@ fn fallback() -> std::io::Result<Fallback> {
 struct Inner {
     spec: OneShot,
     timeout: Duration,
+    policy: RestartPolicy,
+    health: Arc<Mutex<Health>>,
     next_id: AtomicU64,
     /// Serializes starting a process.
     gate: tokio::sync::Mutex<()>,
@@ -265,14 +326,16 @@ impl Session {
     /// A session for `runtime` of the extension called `extension` in `dir`. No process starts
     /// before the first request.
     pub fn new(extension: &str, dir: PathBuf, runtime: &ScriptRuntime) -> Self {
-        Self::from_spec(OneShot::new(extension, dir, runtime))
+        Self::from_spec(OneShot::new(extension, dir, runtime), RestartPolicy::default())
     }
 
-    fn from_spec(spec: OneShot) -> Self {
+    fn from_spec(spec: OneShot, policy: RestartPolicy) -> Self {
         Self {
             inner: Arc::new(Inner {
                 timeout: spec.timeout(),
                 spec,
+                policy,
+                health: Arc::default(),
                 next_id: AtomicU64::new(0),
                 gate: tokio::sync::Mutex::new(()),
                 current: Mutex::new(None),
@@ -286,7 +349,13 @@ impl Session {
     /// Appends the stderr of the process to `path` (`<data dir>/logs/<extension>.log`).
     #[must_use]
     pub fn with_log(self, path: PathBuf) -> Self {
-        Self::from_spec(OneShot::clone(&self.inner.spec).with_log(path))
+        Self::from_spec(OneShot::clone(&self.inner.spec).with_log(path), self.inner.policy)
+    }
+
+    /// Replaces the default restart policy (three restarts per minute).
+    #[must_use]
+    pub fn with_restart_policy(self, policy: RestartPolicy) -> Self {
+        Self::from_spec(OneShot::clone(&self.inner.spec), policy)
     }
 
     /// Runs the tasks of the process on the runtime the caller is in. Queries do this on their
@@ -334,7 +403,18 @@ impl Session {
         if self.inner.closed.load(Ordering::SeqCst) {
             return Ok(None);
         }
+        let restart_at = {
+            let health = lock(&self.inner.health);
+            if let Some(stderr) = &health.failed {
+                return Err(Failure::KeepsCrashing(stderr.clone()));
+            }
+            health.restart_at
+        };
+        if let Some(at) = restart_at {
+            sleep_until(at).await;
+        }
         let proc = self.spawn()?;
+        lock(&self.inner.health).restart_at = None;
         let mut current = lock(&self.inner.current);
         if self.inner.closed.load(Ordering::SeqCst) {
             proc.stop();
@@ -377,7 +457,15 @@ impl Session {
         });
         handle.spawn(write_loop(stdin, lines));
         handle.spawn(read_loop(stdout, proc.clone(), eof.clone()));
-        handle.spawn(supervise(child, proc.clone(), eof, stderr, exit_tx));
+        handle.spawn(supervise(
+            child,
+            proc.clone(),
+            eof,
+            stderr,
+            exit_tx,
+            self.inner.health.clone(),
+            self.inner.policy,
+        ));
         Ok(proc)
     }
 
@@ -595,5 +683,77 @@ async fn pump(mut call: Call) -> Option<(Event, QueryState)> {
                 }
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn crash(health: &mut Health, policy: &RestartPolicy, at: Instant) {
+        health.record_crash(policy, at, Some("boom".into()));
+    }
+
+    #[test]
+    fn the_backoff_doubles_per_crash_within_the_window() {
+        let policy = RestartPolicy::default();
+        let mut health = Health::default();
+        let t0 = Instant::now();
+        let mut delays = vec![];
+        for n in 0..3 {
+            let at = t0 + Duration::from_secs(n);
+            crash(&mut health, &policy, at);
+            delays.push(health.restart_at.unwrap().duration_since(at));
+        }
+        assert_eq!(
+            delays,
+            [Duration::from_millis(250), Duration::from_millis(500), Duration::from_secs(1)]
+        );
+        assert_eq!(health.failed, None);
+    }
+
+    #[test]
+    fn the_fourth_crash_within_a_minute_fails_the_session_with_the_last_stderr_line() {
+        let policy = RestartPolicy::default();
+        let mut health = Health::default();
+        let t0 = Instant::now();
+        for n in 0..4 {
+            crash(&mut health, &policy, t0 + Duration::from_secs(n * 10));
+        }
+        assert_eq!(health.failed, Some(Some("boom".to_owned())));
+    }
+
+    #[test]
+    fn old_crashes_expire_as_the_window_slides() {
+        let policy = RestartPolicy::default();
+        let mut health = Health::default();
+        let t0 = Instant::now();
+        for n in 0..3 {
+            crash(&mut health, &policy, t0 + Duration::from_secs(n));
+        }
+        // The first three are more than a minute old: this is the first crash of a new window.
+        let later = t0 + Duration::from_secs(63);
+        crash(&mut health, &policy, later);
+        assert_eq!(health.failed, None);
+        assert_eq!(health.crashes.len(), 1);
+        assert_eq!(health.restart_at, Some(later + Duration::from_millis(250)));
+    }
+
+    #[test]
+    fn a_crash_exactly_one_window_old_no_longer_counts() {
+        let policy = RestartPolicy { max_restarts: 1, ..RestartPolicy::default() };
+        let mut health = Health::default();
+        let t0 = Instant::now();
+        crash(&mut health, &policy, t0);
+        crash(&mut health, &policy, t0 + policy.window);
+        assert_eq!(health.failed, None);
+    }
+
+    #[test]
+    fn no_restarts_allowed_fails_at_the_first_crash() {
+        let policy = RestartPolicy { max_restarts: 0, ..RestartPolicy::default() };
+        let mut health = Health::default();
+        crash(&mut health, &policy, Instant::now());
+        assert!(health.failed.is_some());
     }
 }

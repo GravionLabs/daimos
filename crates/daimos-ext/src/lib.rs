@@ -26,5 +26,5 @@ pub use provider::{
 pub use registry::{ExtensionRecord, ExtensionState, Registry};
 pub use script::{Failure, OneShot, ScriptBackend};
 pub use secrets::{MockSecretStore, OsSecretStore, SecretError, SecretStore};
-pub use session::Session;
+pub use session::{RestartPolicy, Session};
 pub use watch::{ExtensionHost, ExtensionWatcher};

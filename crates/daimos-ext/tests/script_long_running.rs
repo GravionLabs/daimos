@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use daimos_ext::dir::load_extension;
 use daimos_ext::script::Event;
-use daimos_ext::{Failure, Session};
+use daimos_ext::{Failure, RestartPolicy, Session};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
@@ -270,4 +270,113 @@ async fn a_script_that_breaks_the_protocol_fails_the_query_with_the_line() {
         panic!("{events:?}")
     };
     assert!(message.contains("this is not json"), "{message}");
+}
+
+fn quick(max_restarts: usize, window_ms: u64) -> RestartPolicy {
+    RestartPolicy {
+        max_restarts,
+        window: Duration::from_millis(window_ms),
+        backoff: Duration::from_millis(20),
+    }
+}
+
+fn exit_failure(events: &[Event]) -> Option<&Failure> {
+    match events.last() {
+        Some(Event::Failed(failure)) => Some(failure),
+        _ => None,
+    }
+}
+
+fn crashed(events: &[Event]) -> bool {
+    matches!(
+        exit_failure(events),
+        Some(Failure::Exit { code: Some(2), stderr: Some(line) }) if line == "crashing on request"
+    )
+}
+
+#[tokio::test]
+async fn a_crash_fails_the_request_in_flight_and_the_next_one_restarts_the_process() {
+    let python = python_or_skip!();
+    let ext = install(python, "");
+    assert_eq!(ext.titles("a").await.len(), 3);
+    assert!(crashed(&ext.query("crash").await));
+    let started = Instant::now();
+    assert_eq!(ext.titles("b").await, ["echo b", "again b", "last b"]);
+    // The first restart waits 250 ms after the crash (the python start is on top of it).
+    assert!(started.elapsed() >= Duration::from_millis(150), "{:?}", started.elapsed());
+    assert_eq!(ext.starts(), 2);
+}
+
+#[tokio::test]
+async fn three_restarts_in_a_minute_work_and_the_fourth_crash_shows_one_error_item() {
+    let python = python_or_skip!();
+    let ext = install(python, "");
+    for _ in 0..3 {
+        assert!(crashed(&ext.query("crash").await));
+    }
+    // The third restart works.
+    assert_eq!(ext.titles("ok").await.len(), 3);
+    assert_eq!(ext.starts(), 4);
+    // The fourth crash is not restarted.
+    assert!(crashed(&ext.query("crash").await));
+    let batches: Vec<_> = ext
+        .session
+        .query_batches("search", "ok", Default::default(), CancellationToken::new())
+        .collect()
+        .await;
+    let [batch] = batches.as_slice() else { panic!("{batches:?}") };
+    let [error] = batch.items.as_slice() else { panic!("{batch:?}") };
+    assert_eq!(error.title, "echo keeps crashing");
+    assert_eq!(error.subtitle.as_deref(), Some("crashing on request"));
+    assert_eq!(ext.starts(), 4, "no process starts in the failed state");
+    // Every query gets the same single error item.
+    let again = ext.query("anything").await;
+    assert_eq!(again, [Event::Failed(Failure::KeepsCrashing(Some("crashing on request".into())))]);
+    assert_eq!(ext.starts(), 4);
+}
+
+#[tokio::test]
+async fn the_window_slides_so_old_crashes_expire() {
+    let python = python_or_skip!();
+    let ext = install(python, "");
+    let session = ext.session.clone().with_restart_policy(quick(1, 600));
+    let ext = Installed { session, ..ext };
+    assert!(crashed(&ext.query("crash").await));
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    // One restart is allowed per 600 ms: the crash above has expired.
+    assert!(crashed(&ext.query("crash").await));
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(ext.titles("ok").await.len(), 3);
+    assert_eq!(ext.starts(), 3);
+}
+
+#[tokio::test]
+async fn a_second_crash_in_the_window_fails_until_the_session_is_replaced() {
+    let python = python_or_skip!();
+    let ext = install(python, "");
+    let session = ext.session.clone().with_restart_policy(quick(1, 60_000));
+    let ext = Installed { session, ..ext };
+    assert!(crashed(&ext.query("crash").await));
+    assert!(crashed(&ext.query("crash").await));
+    assert!(matches!(ext.query("ok").await.as_slice(), [Event::Failed(Failure::KeepsCrashing(_))]));
+    // A reload builds a fresh session: no failed state.
+    ext.session.shutdown();
+    let loaded = load_extension(&ext.dir()).unwrap();
+    let fresh = Session::new("echo", ext.dir(), loaded.manifest.runtime.script.as_ref().unwrap());
+    let ext = Installed { session: fresh, ..ext };
+    assert_eq!(ext.titles("ok").await.len(), 3);
+}
+
+#[tokio::test]
+async fn deliberate_stops_do_not_count_as_crashes() {
+    let python = python_or_skip!();
+    let ext = install(python, "timeout_ms = 300");
+    let session = ext.session.clone().with_restart_policy(quick(1, 60_000));
+    let ext = Installed { session, ..ext };
+    // Three timeout kills would fail a session that counted them (one restart is allowed).
+    for _ in 0..3 {
+        let events = ext.query("hang").await;
+        assert!(matches!(exit_failure(&events), Some(Failure::Timeout(_))), "{events:?}");
+    }
+    assert_eq!(ext.titles("ok").await.len(), 3);
 }
