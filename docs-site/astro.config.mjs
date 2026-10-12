@@ -42,6 +42,7 @@ export default defineConfig({
           items: [
             { label: "Overview", slug: "extensions" },
             { label: "Manifest", slug: "extensions/manifest" },
+            { label: "Script extensions", slug: "extensions/scripts" },
             { label: "Extension commands", slug: "extensions/cli" },
           ],
         },

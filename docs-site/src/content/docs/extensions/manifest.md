@@ -65,7 +65,8 @@ One entry per command.
 
 ## `[runtime.script]` and `[runtime.wasm]`
 
-Only the table that matches `runtime` is used.
+Only the table that matches `runtime` is used. How a script extension talks to Daimos is
+described in [script extensions](../scripts/).
 
 | Table              | Field          | Meaning                                                   |
 | ------------------ | -------------- | --------------------------------------------------------- |
@@ -110,8 +111,8 @@ Each command is a source of results with the id `<extension name>.<command name>
 - Every result from an extension carries the extension's `title` as a label, so you can see where
   it came from.
 
-The script and wasm runtimes that answer the queries are still in development, so a loaded command
-returns no results yet.
+One-shot script extensions answer queries, see [script extensions](../scripts/). Wasm extensions
+and long-running scripts are still in development, so their commands return no results yet.
 
 ## Validation
 
