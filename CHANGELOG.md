@@ -5,10 +5,14 @@ Versioning follows [Semantic Versioning](https://semver.org/) and GitVersion (Gi
 
 ---
 
-## [0.3.0] — 2026-10-11
+## [0.3.0] — 2026-10-12
 
 ### Bug Fixes
 - Record the clipboard through Xwayland where there is no wlr-data-control (#134)
+
+
+### Documentation
+- Update CHANGELOG.md for v0.3.0
 
 
 ### Features
