@@ -4,9 +4,4 @@
 #
 # Releases are numbered from the last stable tag: a merge is the next patch, `+semver: minor` or
 # `+semver: major` in a commit message bumps that part.
-#
-# next-version is needed for the first stable release only: the last tag (v0.2.0-beta.25) is a
-# pre-release, and GitVersion does not raise the version of a tagged pre-release. Delete the line
-# after v0.3.0 exists.
-next-version: 0.3.0
 mode: ContinuousDeployment
