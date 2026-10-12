@@ -72,6 +72,11 @@ pub struct Item {
     /// Positions (in characters) of the title that matched the query, for highlighting.
     #[serde(default)]
     pub highlight: Vec<u32>,
+    /// For items from an extension: whether its runtime is sandboxed (wasm) or runs with the
+    /// user's rights (script). `None` for the built-in sources. Set by the host, never by the
+    /// extension.
+    #[serde(default)]
+    pub sandboxed: Option<bool>,
 }
 
 impl Item {
@@ -86,6 +91,7 @@ impl Item {
             actions: Vec::new(),
             detail: None,
             highlight: Vec::new(),
+            sandboxed: None,
         }
     }
 }

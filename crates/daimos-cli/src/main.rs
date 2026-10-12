@@ -258,6 +258,7 @@ mod tests {
             runtime: version.map(|_| "script".into()),
             state: state.into(),
             message: message.map(Into::into),
+            ..ExtensionInfo::default()
         }
     }
 

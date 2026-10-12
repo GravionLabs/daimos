@@ -33,25 +33,73 @@ pub enum Request {
     ExtList,
 }
 
+/// A filesystem path an extension asks for.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct FilesystemAccess {
+    pub path: String,
+    /// `false` for read only.
+    pub write: bool,
+}
+
+/// What an extension asks for or what the user confirmed.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct CapabilityList {
+    pub network: Vec<String>,
+    pub filesystem: Vec<FilesystemAccess>,
+    /// `read`, `write` or `read-write`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipboard: Option<String>,
+    pub keyring: Vec<String>,
+}
+
+/// A preference of an extension. The value of a password is never part of this.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+pub struct PreferenceInfo {
+    pub name: String,
+    pub title: String,
+    /// `text`, `password`, `number` or `checkbox`.
+    pub kind: String,
+    pub required: bool,
+    /// Whether a value is stored. A password is only ever reported as set or not.
+    pub is_set: bool,
+    /// The stored value of a text, number or checkbox preference; always `None` for a password.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
 /// One extension in the answer to `ext_list`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ExtensionInfo {
     pub name: String,
+    /// The `title` of the manifest; `None` when the manifest could not be read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     /// `None` when the manifest could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
     /// `script` or `wasm`; `None` when the manifest could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
-    /// `enabled` or `error`.
+    /// `true` for wasm; a script runs with the user's rights.
+    pub sandboxed: bool,
+    /// `enabled`, `needs-confirmation` or `error`.
     pub state: String,
     /// Why the extension is disabled, when `state` is `error`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// What the manifest declares.
+    pub capabilities: CapabilityList,
+    /// What the user confirmed; `None` before the first confirmation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmed: Option<CapabilityList>,
+    /// What waits for a confirmation: everything before the first one, then what an update added.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub added: Option<CapabilityList>,
+    pub preferences: Vec<PreferenceInfo>,
 }
 
 /// The answer to `ext_list`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ExtensionList {
     pub extensions: Vec<ExtensionInfo>,
 }
@@ -337,6 +385,7 @@ mod tests {
                     runtime: Some("script".into()),
                     state: "enabled".into(),
                     message: None,
+                    ..ExtensionInfo::default()
                 },
                 ExtensionInfo {
                     name: "broken".into(),
@@ -344,6 +393,7 @@ mod tests {
                     runtime: None,
                     state: "error".into(),
                     message: Some("extension.toml:2: bad".into()),
+                    ..ExtensionInfo::default()
                 },
             ],
         };
@@ -354,6 +404,38 @@ mod tests {
         );
         assert!(!json.contains("null"), "{json}");
         assert_eq!(serde_json::from_str::<Response>(&json).unwrap(), Response::Extensions(list));
+    }
+
+    #[test]
+    fn capabilities_sandbox_label_and_preferences_round_trip() {
+        let info = ExtensionInfo {
+            name: "gh".into(),
+            sandboxed: true,
+            state: "needs-confirmation".into(),
+            capabilities: CapabilityList {
+                network: vec!["api.github.com".into()],
+                filesystem: vec![FilesystemAccess { path: "/x".into(), write: false }],
+                clipboard: Some("write".into()),
+                keyring: vec!["token".into()],
+            },
+            added: Some(CapabilityList::default()),
+            preferences: vec![PreferenceInfo {
+                name: "token".into(),
+                title: "Token".into(),
+                kind: "password".into(),
+                required: true,
+                is_set: true,
+                value: None,
+            }],
+            ..ExtensionInfo::default()
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(
+            json.contains(r#""sandboxed":true"#) && json.contains(r#""is_set":true"#),
+            "{json}"
+        );
+        assert!(!json.contains(r#""value""#), "a password has no value on the wire: {json}");
+        assert_eq!(serde_json::from_str::<ExtensionInfo>(&json).unwrap(), info);
     }
 
     #[test]

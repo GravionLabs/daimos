@@ -11,7 +11,12 @@ use std::time::{Duration, Instant};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 
+use daimos_core::ipc::ExtensionList;
+
+use crate::consent;
 use crate::dir::{self, LoadError, MANIFEST_FILE};
+use crate::manifest::Manifest;
+use crate::preferences::Preferences;
 use crate::provider::{Backend, ErrorProvider, providers_for};
 use crate::registry::{ExtensionRecord, Registry};
 
@@ -29,11 +34,60 @@ pub struct ExtensionHost {
     root: PathBuf,
     backend: Arc<dyn Backend>,
     registry: Arc<Registry>,
+    preferences: Option<Arc<Preferences>>,
 }
 
 impl ExtensionHost {
     pub fn new(root: PathBuf, backend: Arc<dyn Backend>, registry: Arc<Registry>) -> Self {
-        Self { root, backend, registry }
+        Self { root, backend, registry, preferences: None }
+    }
+
+    /// Lets the host list, set and clear the preference values of extensions.
+    #[must_use]
+    pub fn with_preferences(mut self, preferences: Arc<Preferences>) -> Self {
+        self.preferences = Some(preferences);
+        self
+    }
+
+    /// The extensions with their state, capabilities and preferences, as the UI shows them.
+    pub fn list(&self) -> ExtensionList {
+        self.registry.ipc_list_with(self.preferences.as_deref())
+    }
+
+    /// Confirms the capabilities of the extension called `name` as its manifest declares them now
+    /// and loads it again, so it is enabled when this returns.
+    pub fn confirm(&self, name: &str) -> Result<(), String> {
+        let record = self
+            .registry
+            .list()
+            .into_iter()
+            .find(|record| record.name == name)
+            .ok_or_else(|| format!("no extension named `{name}`"))?;
+        consent::confirm(&self.root.join(&record.key)).map_err(|error| error.to_string())?;
+        self.reload(&record.key);
+        Ok(())
+    }
+
+    fn preference_target(&self, name: &str) -> Result<(Arc<Preferences>, Manifest), String> {
+        let preferences =
+            self.preferences.clone().ok_or_else(|| "preferences are not available".to_owned())?;
+        let manifest = self
+            .registry
+            .manifest_of(name)
+            .ok_or_else(|| format!("no extension named `{name}` is loaded"))?;
+        Ok((preferences, manifest))
+    }
+
+    /// Stores the value of a preference; a password goes to the OS keyring.
+    pub fn set_preference(&self, name: &str, key: &str, value: &str) -> Result<(), String> {
+        let (preferences, manifest) = self.preference_target(name)?;
+        preferences.set(&manifest, key, value).map_err(|error| error.to_string())
+    }
+
+    /// Removes the value of a preference.
+    pub fn clear_preference(&self, name: &str, key: &str) -> Result<(), String> {
+        let (preferences, manifest) = self.preference_target(name)?;
+        preferences.clear(&manifest, key).map_err(|error| error.to_string())
     }
 
     pub fn registry(&self) -> &Arc<Registry> {
@@ -94,13 +148,17 @@ impl ExtensionHost {
                 }
                 if extension.pending().is_some() {
                     log::info!("extension {key} waits for the confirmation of its capabilities");
-                    self.registry
-                        .replace(ExtensionRecord::needs_confirmation(key, manifest), Vec::new());
+                    let record = ExtensionRecord::needs_confirmation(key, manifest)
+                        .with_consent(extension.consent.clone())
+                        .with_added(extension.pending());
+                    self.registry.replace(record, Vec::new());
                     return;
                 }
                 self.backend.load(&extension);
                 let providers = providers_for(manifest, &self.backend);
-                self.registry.replace(ExtensionRecord::enabled(key, manifest), providers);
+                let record =
+                    ExtensionRecord::enabled(key, manifest).with_consent(extension.consent.clone());
+                self.registry.replace(record, providers);
                 log::info!("loaded extension {key}");
             }
             Err(error) => self.fail(key, error.to_string()),
@@ -448,6 +506,90 @@ mod tests {
         );
         host.reload("ext");
         assert_eq!(host.registry().record("ext").unwrap().state, ExtensionState::Enabled);
+    }
+
+    fn host_with_preferences(
+        root: &Path,
+    ) -> (Arc<ExtensionHost>, Arc<crate::secrets::MockSecretStore>) {
+        let secrets = Arc::new(crate::secrets::MockSecretStore::new());
+        let preferences = Arc::new(Preferences::new(
+            daimos_core::settings::SettingsStore::new(root.join(".config")),
+            secrets.clone(),
+        ));
+        let host = ExtensionHost::new(
+            root.to_path_buf(),
+            Arc::new(StubBackend),
+            Arc::new(Registry::new()),
+        )
+        .with_preferences(preferences);
+        (Arc::new(host), secrets)
+    }
+
+    #[test]
+    fn confirming_by_name_enables_the_extension_and_the_list_shows_it() {
+        let root = tempfile::tempdir().unwrap();
+        write_unconfirmed(root.path(), "folder", &manifest("ext", "k"));
+        let host = host(root.path());
+        host.reload_all();
+        let before = host.list().extensions.remove(0);
+        assert_eq!(before.state, "needs-confirmation");
+        assert!(before.confirmed.is_none());
+        assert_eq!(before.added.as_ref().map(|a| a.network.len()), Some(0));
+        assert!(host.registry().providers_of("folder").is_empty());
+
+        host.confirm("ext").unwrap();
+        let after = host.list().extensions.remove(0);
+        assert_eq!(after.state, "enabled");
+        assert!(after.confirmed.is_some() && after.added.is_none());
+        assert_eq!(keywords_of(host.registry(), "folder"), ["k"]);
+
+        let error = host.confirm("nope").unwrap_err();
+        assert!(error.contains("no extension named `nope`"), "{error}");
+    }
+
+    #[test]
+    fn confirming_an_update_lists_the_added_capability_first() {
+        let root = tempfile::tempdir().unwrap();
+        write(root.path(), "ext", &manifest("ext", "k"));
+        let host = host(root.path());
+        host.reload_all();
+        write_unconfirmed(
+            root.path(),
+            "ext",
+            &with_capabilities(&manifest("ext", "k"), "network = [\"new.example\"]"),
+        );
+        host.reload("ext");
+        let info = host.list().extensions.remove(0);
+        assert_eq!(info.state, "needs-confirmation");
+        assert_eq!(info.added.unwrap().network, ["new.example"]);
+        assert!(info.confirmed.unwrap().network.is_empty());
+        host.confirm("ext").unwrap();
+        assert_eq!(host.list().extensions[0].state, "enabled");
+    }
+
+    #[test]
+    fn preferences_are_set_and_cleared_by_extension_and_key() {
+        let root = tempfile::tempdir().unwrap();
+        let source = format!(
+            "{}\n[[preferences]]\nname = \"token\"\ntitle = \"T\"\ntype = \"password\"\n",
+            manifest("ext", "k")
+        );
+        write(root.path(), "ext", &source);
+        let (host, secrets) = host_with_preferences(root.path());
+        host.reload_all();
+        host.set_preference("ext", "token", "pw").unwrap();
+        assert_eq!(secrets.users(), ["ext/token"]);
+        assert!(host.list().extensions[0].preferences[0].is_set);
+        host.clear_preference("ext", "token").unwrap();
+        assert!(secrets.users().is_empty());
+        assert!(!host.list().extensions[0].preferences[0].is_set);
+
+        assert!(host.set_preference("ext", "nope", "x").unwrap_err().contains("no preference"));
+        assert!(host.set_preference("other", "token", "x").unwrap_err().contains("no extension"));
+        // A host without preferences refuses.
+        let plain = self::host(root.path());
+        plain.reload_all();
+        assert!(plain.set_preference("ext", "token", "x").is_err());
     }
 
     #[test]

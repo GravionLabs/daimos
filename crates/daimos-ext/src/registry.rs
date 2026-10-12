@@ -3,10 +3,16 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use daimos_core::ipc::{ExtensionInfo, ExtensionList};
+use daimos_core::ipc::{
+    CapabilityList, ExtensionInfo, ExtensionList, FilesystemAccess, PreferenceInfo,
+};
 use daimos_core::provider::Provider;
 
-use crate::manifest::{Manifest, Runtime};
+use crate::consent::ConsentRecord;
+use crate::manifest::{
+    Capabilities, ClipboardAccess, Manifest, PreferenceKind, Runtime, split_filesystem,
+};
+use crate::preferences::Preferences;
 
 /// Whether an extension runs.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +46,36 @@ pub struct ExtensionRecord {
     pub version: Option<String>,
     pub runtime: Option<Runtime>,
     pub state: ExtensionState,
+    /// The manifest, when it loaded.
+    pub manifest: Option<Manifest>,
+    /// What the user confirmed.
+    pub consent: Option<ConsentRecord>,
+    /// What waits for a confirmation, in the `needs-confirmation` state.
+    pub added: Option<Capabilities>,
+}
+
+/// The wire form of capabilities.
+pub fn capability_list(capabilities: &Capabilities) -> CapabilityList {
+    CapabilityList {
+        network: capabilities.network.clone(),
+        filesystem: capabilities
+            .filesystem
+            .iter()
+            .map(|entry| {
+                let (path, write) = split_filesystem(entry);
+                FilesystemAccess { path: path.to_owned(), write }
+            })
+            .collect(),
+        clipboard: capabilities.clipboard.map(|access| {
+            match access {
+                ClipboardAccess::Read => "read",
+                ClipboardAccess::Write => "write",
+                ClipboardAccess::ReadWrite => "read-write",
+            }
+            .to_owned()
+        }),
+        keyring: capabilities.keyring.clone(),
+    }
 }
 
 impl ExtensionRecord {
@@ -50,7 +86,24 @@ impl ExtensionRecord {
             version: Some(manifest.extension.version.clone()),
             runtime: Some(manifest.extension.runtime),
             state: ExtensionState::Enabled,
+            manifest: Some(manifest.clone()),
+            consent: None,
+            added: None,
         }
+    }
+
+    /// Adds the consent the extension was loaded with.
+    #[must_use]
+    pub fn with_consent(mut self, consent: Option<ConsentRecord>) -> Self {
+        self.consent = consent;
+        self
+    }
+
+    /// Adds what waits for a confirmation.
+    #[must_use]
+    pub fn with_added(mut self, added: Option<Capabilities>) -> Self {
+        self.added = added;
+        self
     }
 
     /// An extension that waits for the user to confirm its capabilities.
@@ -65,6 +118,9 @@ impl ExtensionRecord {
             version: None,
             runtime: None,
             state: ExtensionState::Error(message),
+            manifest: None,
+            consent: None,
+            added: None,
         }
     }
 }
@@ -121,28 +177,71 @@ impl Registry {
         extensions.values().map(|entry| entry.record.clone()).collect()
     }
 
-    /// The extensions as `daimos ext list` answers over the socket.
+    /// The extensions as `daimos ext list` answers over the socket. Preference values are not
+    /// looked up; use [`ipc_list_with`](Self::ipc_list_with) for those.
     pub fn ipc_list(&self) -> ExtensionList {
-        let extensions = self
-            .list()
-            .into_iter()
-            .map(|record| ExtensionInfo {
-                name: record.name,
-                version: record.version,
-                runtime: record.runtime.map(|r| r.as_str().to_owned()),
-                state: record.state.label().to_owned(),
-                message: match record.state {
-                    ExtensionState::Error(message) => Some(message),
-                    ExtensionState::Enabled | ExtensionState::NeedsConfirmation => None,
-                },
-            })
-            .collect();
+        self.ipc_list_with(None)
+    }
+
+    /// Like [`ipc_list`](Self::ipc_list), with the stored preference values from `preferences`.
+    /// The value of a password is never included, only whether one is set.
+    pub fn ipc_list_with(&self, preferences: Option<&Preferences>) -> ExtensionList {
+        let extensions =
+            self.list().into_iter().map(|record| info_of(record, preferences)).collect();
         ExtensionList { extensions }
+    }
+
+    /// The manifest of the extension called `name` (its manifest name).
+    pub fn manifest_of(&self, name: &str) -> Option<Manifest> {
+        self.list().into_iter().find(|record| record.name == name).and_then(|r| r.manifest)
     }
 
     pub fn record(&self, key: &str) -> Option<ExtensionRecord> {
         let extensions = self.extensions.read().unwrap_or_else(|e| e.into_inner());
         extensions.get(key).map(|entry| entry.record.clone())
+    }
+}
+
+fn info_of(record: ExtensionRecord, preferences: Option<&Preferences>) -> ExtensionInfo {
+    let manifest = record.manifest.as_ref();
+    let status = manifest.zip(preferences).and_then(|(m, p)| p.status(m).ok()).unwrap_or_default();
+    let stored = manifest.zip(preferences).and_then(|(m, p)| p.values(m).ok()).unwrap_or_default();
+    let preferences = manifest
+        .map(|m| {
+            m.preferences
+                .iter()
+                .map(|preference| PreferenceInfo {
+                    name: preference.name.clone(),
+                    title: preference.title.clone(),
+                    kind: match preference.kind {
+                        PreferenceKind::Text => "text",
+                        PreferenceKind::Password => "password",
+                        PreferenceKind::Number => "number",
+                        PreferenceKind::Checkbox => "checkbox",
+                    }
+                    .to_owned(),
+                    required: preference.required,
+                    is_set: status.iter().any(|s| s.name == preference.name && s.is_set),
+                    value: stored.get(&preference.name).cloned(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    ExtensionInfo {
+        name: record.name,
+        title: manifest.map(|m| m.extension.title.clone()),
+        version: record.version,
+        runtime: record.runtime.map(|r| r.as_str().to_owned()),
+        sandboxed: record.runtime == Some(Runtime::Wasm),
+        state: record.state.label().to_owned(),
+        message: match record.state {
+            ExtensionState::Error(message) => Some(message),
+            ExtensionState::Enabled | ExtensionState::NeedsConfirmation => None,
+        },
+        capabilities: manifest.map(|m| capability_list(&m.capabilities)).unwrap_or_default(),
+        confirmed: record.consent.as_ref().map(|c| capability_list(&c.capabilities)),
+        added: record.added.as_ref().map(capability_list),
+        preferences,
     }
 }
 
@@ -236,5 +335,95 @@ mod tests {
         assert_eq!(list[1].runtime.as_deref(), Some("script"));
         assert_eq!(list[1].version.as_deref(), Some("1.0.0"));
         assert_eq!((list[1].state.as_str(), list[1].message.as_deref()), ("enabled", None));
+    }
+
+    fn wasm_manifest() -> Manifest {
+        let source = "[extension]\nname = \"w\"\ntitle = \"Wasm One\"\nversion = \"2.0.0\"\n\
+            runtime = \"wasm\"\n\n[[commands]]\nname = \"s\"\ntitle = \"S\"\n\n\
+            [runtime.wasm]\ncomponent = \"main.wasm\"\n\n[capabilities]\n\
+            network = [\"a.com\"]\nfilesystem = [\"/x:rw\", \"/y\"]\nclipboard = \"read-write\"\n\
+            keyring = [\"k\"]\n\n[[preferences]]\nname = \"token\"\ntitle = \"Token\"\n\
+            type = \"password\"\nrequired = true\n\n[[preferences]]\nname = \"user\"\n\
+            title = \"User\"\ntype = \"text\"\n";
+        Manifest::parse(source, std::path::Path::new("e.toml")).unwrap()
+    }
+
+    #[test]
+    fn the_ipc_list_labels_scripts_unsandboxed_and_wasm_sandboxed() {
+        let registry = Registry::new();
+        put(&registry, "gh", r#"["gh"]"#);
+        registry.replace(ExtensionRecord::enabled("w", &wasm_manifest()), Vec::new());
+        registry.replace(ExtensionRecord::failed("broken", "bad".into()), Vec::new());
+        let list = registry.ipc_list().extensions;
+        let by_name = |name: &str| list.iter().find(|e| e.name == name).unwrap();
+        assert!(!by_name("gh").sandboxed);
+        assert!(by_name("w").sandboxed);
+        assert!(!by_name("broken").sandboxed, "no runtime, no label");
+        assert_eq!(by_name("w").title.as_deref(), Some("Wasm One"));
+    }
+
+    #[test]
+    fn the_ipc_list_carries_declared_and_confirmed_capabilities() {
+        let registry = Registry::new();
+        let manifest = wasm_manifest();
+        let confirmed = crate::consent::ConsentRecord {
+            version: "1.0.0".into(),
+            capabilities: Capabilities { network: vec!["a.com".into()], ..Capabilities::default() },
+        };
+        let added = manifest.capabilities.diff(&confirmed.capabilities);
+        let record = ExtensionRecord::needs_confirmation("w", &manifest)
+            .with_consent(Some(confirmed))
+            .with_added(Some(added));
+        registry.replace(record, Vec::new());
+        let info = registry.ipc_list().extensions.remove(0);
+        assert_eq!(info.state, "needs-confirmation");
+        assert_eq!(info.capabilities.network, ["a.com"]);
+        assert_eq!(
+            info.capabilities
+                .filesystem
+                .iter()
+                .map(|f| (f.path.as_str(), f.write))
+                .collect::<Vec<_>>(),
+            [("/x", true), ("/y", false)]
+        );
+        assert_eq!(info.capabilities.clipboard.as_deref(), Some("read-write"));
+        assert_eq!(info.capabilities.keyring, ["k"]);
+        assert_eq!(info.confirmed.unwrap().network, ["a.com"]);
+        let added = info.added.unwrap();
+        assert!(added.network.is_empty());
+        assert_eq!(added.keyring, ["k"]);
+        assert_eq!(added.filesystem.len(), 2);
+    }
+
+    #[test]
+    fn preferences_are_listed_and_a_password_value_is_never_serialized() {
+        use crate::secrets::{MockSecretStore, SecretStore};
+        use daimos_core::settings::SettingsStore;
+        let dir = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(MockSecretStore::new());
+        let preferences = Preferences::new(SettingsStore::new(dir.path()), secrets.clone());
+        let manifest = wasm_manifest();
+        let registry = Registry::new();
+        registry.replace(ExtensionRecord::enabled("w", &manifest), Vec::new());
+
+        let before = registry.ipc_list_with(Some(&preferences)).extensions.remove(0);
+        assert_eq!(before.preferences.len(), 2);
+        assert!(before.preferences.iter().all(|p| !p.is_set));
+        assert_eq!(
+            (before.preferences[0].kind.as_str(), before.preferences[0].required),
+            ("password", true)
+        );
+
+        preferences.set(&manifest, "token", "hunter2-secret").unwrap();
+        preferences.set(&manifest, "user", "ada").unwrap();
+        let list = registry.ipc_list_with(Some(&preferences));
+        let after = &list.extensions[0];
+        assert!(after.preferences[0].is_set);
+        assert_eq!(after.preferences[0].value, None);
+        assert_eq!(after.preferences[1].value.as_deref(), Some("ada"));
+        let json = serde_json::to_string(&list).unwrap();
+        assert!(!json.contains("hunter2-secret"), "{json}");
+        assert!(!format!("{list:?}").contains("hunter2-secret"));
+        assert_eq!(secrets.get("w", "token").unwrap().as_deref(), Some("hunter2-secret"));
     }
 }

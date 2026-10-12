@@ -55,6 +55,17 @@ export const commands = {
 	 *  the window stays open, so the UI can say why the text was only copied.
 	 */
 	paste: () => typedError<PasteResult, string>(__TAURI_INVOKE("paste")),
+	/**
+	 *  The extensions with their state, runtime label, capabilities and preferences. A password is
+	 *  only reported as set or not; its value never leaves the keyring.
+	 */
+	extensions: () => typedError<ExtensionList_Serialize, string>(__TAURI_INVOKE("extensions")),
+	/**  The user confirms the capabilities an extension declares now; it is enabled afterwards. */
+	confirmExtension: (name: string) => typedError<null, string>(__TAURI_INVOKE("confirm_extension", { name })),
+	/**  Stores a preference of an extension; passwords go to the OS keyring. */
+	setPreference: (name: string, key: string, value: string) => typedError<null, string>(__TAURI_INVOKE("set_preference", { name, key, value })),
+	/**  Removes the value of a preference of an extension. */
+	clearPreference: (name: string, key: string) => typedError<null, string>(__TAURI_INVOKE("clear_preference", { name, key })),
 };
 
 /** Events */
@@ -109,6 +120,27 @@ export type Capability = {
 	instructions: string | null,
 };
 
+/**  What an extension asks for or what the user confirmed. */
+export type CapabilityList = CapabilityList_Serialize | CapabilityList_Deserialize;
+
+/**  What an extension asks for or what the user confirmed. */
+export type CapabilityList_Deserialize = {
+	network: string[],
+	filesystem: FilesystemAccess[],
+	/**  `read`, `write` or `read-write`. */
+	clipboard?: string | null,
+	keyring: string[],
+};
+
+/**  What an extension asks for or what the user confirmed. */
+export type CapabilityList_Serialize = {
+	network: string[],
+	filesystem: FilesystemAccess[],
+	/**  `read`, `write` or `read-write`. */
+	clipboard?: string | null,
+	keyring: string[],
+};
+
 /**  The clipboard history as the settings page shows it. */
 export type ClipboardView = {
 	enabled: boolean,
@@ -123,6 +155,77 @@ export type ClipboardView = {
 export type Detail = { type: "markdown"; text: string } | { type: "metadata"; entries: ([string, string])[] } | 
 /**  A picture, as a `data:` URL, with a line of text under it. */
 { type: "image"; data_url: string; caption: string };
+
+/**  One extension in the answer to `ext_list`. */
+export type ExtensionInfo = ExtensionInfo_Serialize | ExtensionInfo_Deserialize;
+
+/**  One extension in the answer to `ext_list`. */
+export type ExtensionInfo_Deserialize = {
+	name: string,
+	/**  The `title` of the manifest; `None` when the manifest could not be read. */
+	title?: string | null,
+	/**  `None` when the manifest could not be read. */
+	version?: string | null,
+	/**  `script` or `wasm`; `None` when the manifest could not be read. */
+	runtime?: string | null,
+	/**  `true` for wasm; a script runs with the user's rights. */
+	sandboxed: boolean,
+	/**  `enabled`, `needs-confirmation` or `error`. */
+	state: string,
+	/**  Why the extension is disabled, when `state` is `error`. */
+	message?: string | null,
+	/**  What the manifest declares. */
+	capabilities: CapabilityList_Deserialize,
+	/**  What the user confirmed; `None` before the first confirmation. */
+	confirmed?: CapabilityList_Deserialize | null,
+	/**  What waits for a confirmation: everything before the first one, then what an update added. */
+	added?: CapabilityList_Deserialize | null,
+	preferences: PreferenceInfo_Deserialize[],
+};
+
+/**  One extension in the answer to `ext_list`. */
+export type ExtensionInfo_Serialize = {
+	name: string,
+	/**  The `title` of the manifest; `None` when the manifest could not be read. */
+	title?: string | null,
+	/**  `None` when the manifest could not be read. */
+	version?: string | null,
+	/**  `script` or `wasm`; `None` when the manifest could not be read. */
+	runtime?: string | null,
+	/**  `true` for wasm; a script runs with the user's rights. */
+	sandboxed: boolean,
+	/**  `enabled`, `needs-confirmation` or `error`. */
+	state: string,
+	/**  Why the extension is disabled, when `state` is `error`. */
+	message?: string | null,
+	/**  What the manifest declares. */
+	capabilities: CapabilityList_Serialize,
+	/**  What the user confirmed; `None` before the first confirmation. */
+	confirmed?: CapabilityList_Serialize | null,
+	/**  What waits for a confirmation: everything before the first one, then what an update added. */
+	added?: CapabilityList_Serialize | null,
+	preferences: PreferenceInfo_Serialize[],
+};
+
+/**  The answer to `ext_list`. */
+export type ExtensionList = ExtensionList_Serialize | ExtensionList_Deserialize;
+
+/**  The answer to `ext_list`. */
+export type ExtensionList_Deserialize = {
+	extensions: ExtensionInfo_Deserialize[],
+};
+
+/**  The answer to `ext_list`. */
+export type ExtensionList_Serialize = {
+	extensions: ExtensionInfo_Serialize[],
+};
+
+/**  A filesystem path an extension asks for. */
+export type FilesystemAccess = {
+	path: string,
+	/**  `false` for read only. */
+	write: boolean,
+};
 
 export type FormField = {
 	id: string,
@@ -164,6 +267,12 @@ export type Item = {
 	detail: Detail | null,
 	/**  Positions (in characters) of the title that matched the query, for highlighting. */
 	highlight?: number[],
+	/**
+	 *  For items from an extension: whether its runtime is sandboxed (wasm) or runs with the
+	 *  user's rights (script). `None` for the built-in sources. Set by the host, never by the
+	 *  extension.
+	 */
+	sandboxed?: boolean | null,
 };
 
 export type Level = "available" | "limited" | "unavailable";
@@ -177,6 +286,35 @@ export type PasteResult = {
 	pasted: boolean,
 	/**  Why the text was only copied. */
 	reason: string | null,
+};
+
+/**  A preference of an extension. The value of a password is never part of this. */
+export type PreferenceInfo = PreferenceInfo_Serialize | PreferenceInfo_Deserialize;
+
+/**  A preference of an extension. The value of a password is never part of this. */
+export type PreferenceInfo_Deserialize = {
+	name: string,
+	title: string,
+	/**  `text`, `password`, `number` or `checkbox`. */
+	kind: string,
+	required: boolean,
+	/**  Whether a value is stored. A password is only ever reported as set or not. */
+	is_set: boolean,
+	/**  The stored value of a text, number or checkbox preference; always `None` for a password. */
+	value?: string | null,
+};
+
+/**  A preference of an extension. The value of a password is never part of this. */
+export type PreferenceInfo_Serialize = {
+	name: string,
+	title: string,
+	/**  `text`, `password`, `number` or `checkbox`. */
+	kind: string,
+	required: boolean,
+	/**  Whether a value is stored. A password is only ever reported as set or not. */
+	is_set: boolean,
+	/**  The stored value of a text, number or checkbox preference; always `None` for a password. */
+	value?: string | null,
 };
 
 /**  One provider as the settings page shows it. */

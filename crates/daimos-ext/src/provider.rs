@@ -10,7 +10,7 @@ use futures::stream::{self, BoxStream};
 
 use crate::builtin::{Opener, SystemOpener};
 use crate::dir::LoadedExtension;
-use crate::manifest::{Command, Manifest};
+use crate::manifest::{Command, Manifest, Runtime};
 
 /// Runs the commands of extensions. The script and wasm hosts implement it in later milestones.
 pub trait Backend: Send + Sync {
@@ -61,6 +61,8 @@ pub struct CommandProvider {
     keywords: Vec<String>,
     backend: Arc<dyn Backend>,
     opener: Arc<dyn Opener>,
+    /// Whether the runtime of the extension is sandboxed; set on every item.
+    sandboxed: bool,
     /// The actions of the items this command answered with, by item id.
     known: Arc<Mutex<HashMap<String, Vec<Action>>>>,
 }
@@ -78,6 +80,7 @@ impl CommandProvider {
             keywords: command.keywords.clone(),
             backend,
             opener: Arc::new(SystemOpener),
+            sandboxed: manifest.extension.runtime == Runtime::Wasm,
             known: Arc::default(),
         }
     }
@@ -105,6 +108,7 @@ impl Provider for CommandProvider {
 
     fn query(&self, ctx: QueryContext) -> BoxStream<'static, ItemBatch> {
         let label = self.label.clone();
+        let sandboxed = self.sandboxed;
         let known = Arc::clone(&self.known);
         self.backend
             .query(&self.extension, &self.command, ctx)
@@ -119,6 +123,8 @@ impl Provider for CommandProvider {
                     }
                 }
                 for item in &mut batch.items {
+                    // What the extension sent is ignored: only the host knows the runtime.
+                    item.sandboxed = Some(sandboxed);
                     if !item.accessories.contains(&label) {
                         item.accessories.push(label.clone());
                     }
@@ -295,6 +301,34 @@ pub(crate) mod tests {
         let item = &batches[0].items[0];
         assert_eq!((item.id.as_str(), item.title.as_str()), ("gh/search", "lau"));
         assert_eq!(item.accessories, ["Title of gh"]);
+    }
+
+    #[test]
+    fn items_carry_the_sandbox_flag_of_the_runtime_and_ignore_what_the_extension_says() {
+        let script = manifest("gh", r#"["gh"]"#);
+        let wasm_source = "[extension]\nname = \"w\"\ntitle = \"W\"\nversion = \"1\"\n\
+             runtime = \"wasm\"\n\n[[commands]]\nname = \"s\"\ntitle = \"S\"\n\n\
+             [runtime.wasm]\ncomponent = \"main.wasm\"\n";
+        let wasm = Manifest::parse(wasm_source, Path::new("extension.toml")).unwrap();
+
+        /// Claims to be sandboxed.
+        struct Liar;
+        impl Backend for Liar {
+            fn query(&self, _: &str, _: &str, _: QueryContext) -> BoxStream<'static, ItemBatch> {
+                let mut item = Item::new("i", "t");
+                item.sandboxed = Some(true);
+                stream::once(async move { ItemBatch::from(vec![item]) }).boxed()
+            }
+        }
+        let backend: Arc<dyn Backend> = Arc::new(Liar);
+        let flag = |manifest: &Manifest| {
+            let providers = providers_for(manifest, &backend);
+            let batches =
+                futures::executor::block_on(providers[0].query(ctx("x")).collect::<Vec<_>>());
+            batches[0].items[0].sandboxed
+        };
+        assert_eq!(flag(&script), Some(false));
+        assert_eq!(flag(&wasm), Some(true));
     }
 
     #[test]

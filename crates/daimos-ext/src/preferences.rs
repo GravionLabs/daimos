@@ -130,6 +130,19 @@ impl Preferences {
         Ok(())
     }
 
+    /// The stored values of the declared `text`, `number` and `checkbox` preferences, for the
+    /// settings form. Passwords are not part of it.
+    pub fn values(&self, manifest: &Manifest) -> Result<BTreeMap<String, String>, PreferenceError> {
+        let mut values = self.settings.preference_values(&manifest.extension.name)?;
+        values.retain(|name, _| {
+            manifest
+                .preferences
+                .iter()
+                .any(|p| p.name == *name && p.kind != PreferenceKind::Password)
+        });
+        Ok(values)
+    }
+
     /// Which preferences of the extension have a value. A keyring that cannot be reached counts
     /// its passwords as not set.
     pub fn status(&self, manifest: &Manifest) -> Result<Vec<PreferenceStatus>, PreferenceError> {

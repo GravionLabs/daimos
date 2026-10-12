@@ -131,7 +131,7 @@ impl ClipboardAccess {
 }
 
 /// How a `filesystem` entry (`<path>` or `<path>:ro|rw`) reaches a path; no suffix means `ro`.
-fn split_filesystem(entry: &str) -> (&str, bool) {
+pub(crate) fn split_filesystem(entry: &str) -> (&str, bool) {
     match entry.rsplit_once(':') {
         Some((path, "rw")) => (path, true),
         Some((path, "ro")) => (path, false),

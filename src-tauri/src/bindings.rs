@@ -539,6 +539,56 @@ pub fn query(engine: State<'_, std::sync::Arc<QueryEngine>>, session: u32, text:
     engine.query(session, &text);
 }
 
+/// The extension host, or why there is none (no config directory).
+fn extension_host(app: &AppHandle) -> Result<std::sync::Arc<daimos_ext::ExtensionHost>, String> {
+    app.try_state::<std::sync::Arc<daimos_ext::ExtensionHost>>()
+        .map(|host| std::sync::Arc::clone(&host))
+        .ok_or_else(|| "extensions are off".to_owned())
+}
+
+/// Runs a call of the extension host (it can read the OS keyring) off the main thread.
+async fn on_host<T: Send + 'static>(
+    app: &AppHandle,
+    call: impl FnOnce(&daimos_ext::ExtensionHost) -> T + Send + 'static,
+) -> Result<T, String> {
+    let host = extension_host(app)?;
+    tauri::async_runtime::spawn_blocking(move || call(&host)).await.map_err(|e| e.to_string())
+}
+
+/// The extensions with their state, runtime label, capabilities and preferences. A password is
+/// only reported as set or not; its value never leaves the keyring.
+#[tauri::command]
+#[specta::specta]
+pub async fn extensions(app: AppHandle) -> Result<daimos_core::ipc::ExtensionList, String> {
+    on_host(&app, |host| host.list()).await
+}
+
+/// The user confirms the capabilities an extension declares now; it is enabled afterwards.
+#[tauri::command]
+#[specta::specta]
+pub async fn confirm_extension(app: AppHandle, name: String) -> Result<(), String> {
+    on_host(&app, move |host| host.confirm(&name)).await?
+}
+
+/// Stores a preference of an extension; passwords go to the OS keyring.
+#[tauri::command]
+#[specta::specta]
+pub async fn set_preference(
+    app: AppHandle,
+    name: String,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    on_host(&app, move |host| host.set_preference(&name, &key, &value)).await?
+}
+
+/// Removes the value of a preference of an extension.
+#[tauri::command]
+#[specta::specta]
+pub async fn clear_preference(app: AppHandle, name: String, key: String) -> Result<(), String> {
+    on_host(&app, move |host| host.clear_preference(&name, &key)).await?
+}
+
 pub fn builder() -> Builder<tauri::Wry> {
     Builder::<tauri::Wry>::new()
         .commands(collect_commands![
@@ -560,7 +610,11 @@ pub fn builder() -> Builder<tauri::Wry> {
             set_provider,
             set_aliases,
             set_clipboard_history,
-            paste
+            paste,
+            extensions,
+            confirm_extension,
+            set_preference,
+            clear_preference
         ])
         .events(collect_events![
             WindowShown,
