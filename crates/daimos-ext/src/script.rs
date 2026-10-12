@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
-use daimos_core::model;
+use daimos_core::model::{self, ItemBatch};
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
@@ -23,6 +23,9 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// How long the end of a process waits for its stderr to drain.
 const STDERR_GRACE: Duration = Duration::from_millis(500);
+
+/// A log file larger than this is moved to `<name>.log.1` before the next run appends to it.
+const LOG_LIMIT: u64 = 1024 * 1024;
 
 /// The id of the one request a one-shot process receives.
 const REQUEST_ID: u64 = 1;
@@ -49,6 +52,27 @@ pub enum Event {
     Failed(Failure),
 }
 
+impl Failure {
+    /// What the user reads under the error item.
+    pub fn message(&self) -> String {
+        match self {
+            Self::Spawn(message) | Self::Protocol(message) => message.clone(),
+            Self::Timeout(limit) => format!("timed out after {}", format_duration(*limit)),
+            Self::Exit { stderr: Some(line), .. } => line.clone(),
+            Self::Exit { code: Some(code), .. } => format!("exited with code {code}"),
+            Self::Exit { code: None, .. } => "was stopped before it finished".to_owned(),
+        }
+    }
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.subsec_millis() == 0 {
+        format!("{} s", duration.as_secs())
+    } else {
+        format!("{} ms", duration.as_millis())
+    }
+}
+
 /// What the run of one process reports to its consumer.
 enum Step {
     Message(Response),
@@ -58,15 +82,50 @@ enum Step {
 /// Runs the script of an extension once per request.
 #[derive(Debug, Clone)]
 pub struct OneShot {
+    extension: String,
     dir: PathBuf,
     command: Vec<String>,
     timeout: Duration,
+    /// Where stderr is appended; `None` drops it.
+    log: Option<PathBuf>,
 }
 
 impl OneShot {
-    /// A runner for `runtime` of the extension in `dir`; the process starts in `dir`.
-    pub fn new(dir: PathBuf, runtime: &ScriptRuntime) -> Self {
-        Self { dir, command: runtime.command.clone(), timeout: runtime.timeout() }
+    /// A runner for `runtime` of the extension called `extension` in `dir`; the process starts in
+    /// `dir`.
+    pub fn new(extension: &str, dir: PathBuf, runtime: &ScriptRuntime) -> Self {
+        Self {
+            extension: extension.to_owned(),
+            dir,
+            command: runtime.command.clone(),
+            timeout: runtime.timeout(),
+            log: None,
+        }
+    }
+
+    /// Appends the stderr of every run to `path` (`<data dir>/logs/<extension>.log`).
+    #[must_use]
+    pub fn with_log(mut self, path: PathBuf) -> Self {
+        self.log = Some(path);
+        self
+    }
+
+    /// Like [`query`](Self::query), as batches for a provider: a failure becomes one error item
+    /// after the items that came before it.
+    pub fn query_batches(
+        &self,
+        command: &str,
+        text: &str,
+        preferences: BTreeMap<String, String>,
+        cancel: CancellationToken,
+    ) -> BoxStream<'static, ItemBatch> {
+        let extension = self.extension.clone();
+        self.query(command, text, preferences, cancel)
+            .map(move |event| match event {
+                Event::Items(items) => ItemBatch::from(items),
+                Event::Failed(failure) => ItemBatch::from(vec![failure_item(&extension, &failure)]),
+            })
+            .boxed()
     }
 
     pub fn timeout(&self) -> Duration {
@@ -202,17 +261,12 @@ async fn start(pending: Pending) -> Option<(Step, State)> {
     }
     let stdout = child.stdout.take().map(BufReader::new)?;
     let stderr = child.stderr.take();
+    let log = pending.spec.log.clone();
     let stderr = tokio::spawn(async move {
-        let mut last = None;
-        if let Some(stderr) = stderr {
-            let mut lines = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                if !line.trim().is_empty() {
-                    last = Some(line.trim().to_owned());
-                }
-            }
+        match stderr {
+            Some(stderr) => pump_stderr(stderr, log).await,
+            None => None,
         }
-        last
     });
     let run = Running {
         child,
@@ -225,6 +279,63 @@ async fn start(pending: Pending) -> Option<(Step, State)> {
         stopping: false,
     };
     step(run).await
+}
+
+/// The error item of a failed run.
+pub fn failure_item(extension: &str, failure: &Failure) -> model::Item {
+    let title = match failure {
+        Failure::Timeout(_) => format!("{extension} took too long"),
+        _ => format!("{extension} failed"),
+    };
+    crate::provider::error_item(
+        format!("{extension}.script-error"),
+        title,
+        &failure.message(),
+        extension,
+    )
+}
+
+/// Appends the lines of `stderr` to the log (when there is one) and returns the last non-empty
+/// line. A log that cannot be written is given up on; the run does not notice.
+async fn pump_stderr(stderr: impl AsyncRead + Unpin, log: Option<PathBuf>) -> Option<String> {
+    let mut file = match log {
+        Some(path) => open_log(&path).await,
+        None => None,
+    };
+    let mut last = None;
+    let mut lines = BufReader::new(stderr).lines();
+    let mut written = 0_u64;
+    while let Ok(Some(line)) = lines.next_line().await {
+        if let Some(open) = file.as_mut() {
+            written += line.len() as u64 + 1;
+            // One run cannot grow the log past the limit, however much it writes.
+            if written > LOG_LIMIT || open.write_all(format!("{line}\n").as_bytes()).await.is_err()
+            {
+                file = None;
+            }
+        }
+        if !line.trim().is_empty() {
+            last = Some(line.trim().to_owned());
+        }
+    }
+    last
+}
+
+/// Opens the log for appending, creating its folder and moving an oversized log aside.
+async fn open_log(path: &Path) -> Option<tokio::fs::File> {
+    let result = async {
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        if tokio::fs::metadata(path).await.is_ok_and(|meta| meta.len() > LOG_LIMIT) {
+            let mut old = path.as_os_str().to_owned();
+            old.push(".1");
+            tokio::fs::rename(path, old).await?;
+        }
+        tokio::fs::OpenOptions::new().create(true).append(true).open(path).await
+    }
+    .await;
+    result.map_err(|error| log::warn!("cannot write {}: {error}", path.display())).ok()
 }
 
 impl Running {
@@ -361,9 +472,11 @@ mod tests {
 
     fn runner(dir: &Path, python: &str, timeout_ms: u64) -> OneShot {
         OneShot {
+            extension: "demo".into(),
             dir: dir.to_path_buf(),
             command: vec![python.to_owned(), "main.py".to_owned()],
             timeout: Duration::from_millis(timeout_ms),
+            log: None,
         }
     }
 
@@ -504,9 +617,11 @@ mod tests {
     async fn a_program_that_does_not_exist_is_a_spawn_failure() {
         let dir = tempfile::tempdir().unwrap();
         let shot = OneShot {
+            extension: "demo".into(),
             dir: dir.path().to_path_buf(),
             command: vec!["daimos-no-such-program".into()],
             timeout: Duration::from_secs(5),
+            log: None,
         };
         let events = collect(&shot, "").await;
         let [Event::Failed(Failure::Spawn(message))] = events.as_slice() else {
@@ -581,9 +696,11 @@ mod tests {
     #[test]
     fn a_relative_program_with_a_separator_is_relative_to_the_extension() {
         let shot = OneShot {
+            extension: "demo".into(),
             dir: PathBuf::from("ext"),
             command: vec!["bin/run".into()],
             timeout: Duration::from_secs(1),
+            log: None,
         };
         assert_eq!(shot.program(), Path::new("ext").join("bin/run"));
         let shot = OneShot { command: vec!["python3".into()], ..shot };
@@ -594,7 +711,108 @@ mod tests {
     fn the_runner_takes_its_timeout_from_the_manifest() {
         let runtime =
             ScriptRuntime { command: vec!["x".into()], long_running: false, timeout_ms: 1234 };
-        let shot = OneShot::new(PathBuf::from("."), &runtime);
+        let shot = OneShot::new("demo", PathBuf::from("."), &runtime);
         assert_eq!(shot.timeout(), Duration::from_millis(1234));
+    }
+
+    async fn batches(shot: &OneShot) -> Vec<ItemBatch> {
+        shot.query_batches("search", "", BTreeMap::new(), CancellationToken::new()).collect().await
+    }
+
+    #[tokio::test]
+    async fn stderr_lines_land_in_the_log_file_across_runs() {
+        let python = python_or_skip!();
+        let dir = tempfile::tempdir().unwrap();
+        write_script(
+            dir.path(),
+            &format!(
+                "{PRELUDE}sys.stderr.write('hello ' + request['text'] + '\\n')\nitems('a', done=True)\n"
+            ),
+        );
+        let log = dir.path().join("data").join("logs").join("demo.log");
+        let shot = runner(dir.path(), python, 10_000).with_log(log.clone());
+        shot.query("search", "one", BTreeMap::new(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        shot.query("search", "two", BTreeMap::new(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(std::fs::read_to_string(log).unwrap(), "hello one\nhello two\n");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_log_is_moved_aside_before_appending() {
+        let python = python_or_skip!();
+        let dir = tempfile::tempdir().unwrap();
+        write_script(
+            dir.path(),
+            &format!("{PRELUDE}sys.stderr.write('fresh\\n')\nitems('a', done=True)\n"),
+        );
+        let log = dir.path().join("demo.log");
+        std::fs::write(&log, vec![b'x'; LOG_LIMIT as usize + 1]).unwrap();
+        let shot = runner(dir.path(), python, 10_000).with_log(log.clone());
+        shot.query("search", "", BTreeMap::new(), CancellationToken::new())
+            .collect::<Vec<_>>()
+            .await;
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "fresh\n");
+        assert_eq!(std::fs::metadata(dir.path().join("demo.log.1")).unwrap().len(), LOG_LIMIT + 1);
+    }
+
+    #[tokio::test]
+    async fn a_log_that_cannot_be_written_does_not_fail_the_query() {
+        let python = python_or_skip!();
+        let dir = tempfile::tempdir().unwrap();
+        write_script(
+            dir.path(),
+            &format!("{PRELUDE}sys.stderr.write('x\\n')\nitems('a', done=True)\n"),
+        );
+        // The parent of the log is a file, so the folder cannot be created.
+        std::fs::write(dir.path().join("blocked"), "").unwrap();
+        let shot = runner(dir.path(), python, 10_000).with_log(dir.path().join("blocked/demo.log"));
+        let events = collect(&shot, "").await;
+        assert_eq!(titles(&events), ["A"]);
+        assert_eq!(events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_non_zero_exit_yields_exactly_one_error_item_with_the_last_stderr_line() {
+        let python = python_or_skip!();
+        let dir = tempfile::tempdir().unwrap();
+        write_script(
+            dir.path(),
+            &format!(
+                "{PRELUDE}items('a')\nsys.stderr.write('warming up\\nkaboom\\n')\nsys.exit(1)\n"
+            ),
+        );
+        let batches = batches(&runner(dir.path(), python, 10_000)).await;
+        assert_eq!(batches.len(), 2, "the streamed item stays, then one error");
+        assert_eq!(batches[0].items[0].title, "A");
+        let [error] = batches[1].items.as_slice() else { panic!("{batches:?}") };
+        assert_eq!(error.title, "demo failed");
+        assert_eq!(error.subtitle.as_deref(), Some("kaboom"));
+        assert_eq!(error.accessories, ["demo"]);
+    }
+
+    #[tokio::test]
+    async fn a_timeout_yields_exactly_one_timeout_error_item() {
+        let python = python_or_skip!();
+        let dir = tempfile::tempdir().unwrap();
+        write_script(dir.path(), &format!("{PRELUDE}time.sleep(60)\n"));
+        let batches = batches(&runner(dir.path(), python, 300)).await;
+        let [batch] = batches.as_slice() else { panic!("{batches:?}") };
+        let [error] = batch.items.as_slice() else { panic!("{batch:?}") };
+        assert_eq!(error.title, "demo took too long");
+        assert_eq!(error.subtitle.as_deref(), Some("timed out after 300 ms"));
+    }
+
+    #[test]
+    fn failures_have_a_readable_message() {
+        let exit =
+            |code, stderr: Option<&str>| Failure::Exit { code, stderr: stderr.map(Into::into) };
+        assert_eq!(Failure::Timeout(Duration::from_secs(5)).message(), "timed out after 5 s");
+        assert_eq!(exit(Some(2), Some("bad")).message(), "bad");
+        assert_eq!(exit(Some(2), None).message(), "exited with code 2");
+        assert_eq!(exit(None, None).message(), "was stopped before it finished");
+        assert_eq!(Failure::Spawn("no".into()).message(), "no");
     }
 }

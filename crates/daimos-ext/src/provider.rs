@@ -83,6 +83,15 @@ impl Provider for CommandProvider {
     }
 }
 
+/// The shape of an error item: the problem as the title, the message under it, and the extension
+/// it concerns as the label.
+pub fn error_item(id: String, title: String, message: &str, label: &str) -> Item {
+    let mut item = Item::new(id, title);
+    item.subtitle = Some(message.to_owned());
+    item.accessories.push(label.to_owned());
+    item
+}
+
 /// The one item a broken extension shows instead of its commands.
 ///
 /// It appears for an empty query and for a query that names the extension's directory, so the
@@ -114,9 +123,12 @@ impl Provider for ErrorProvider {
         if !self.matches(&ctx.text) {
             return stream::empty().boxed();
         }
-        let mut item = Item::new(self.id.clone(), format!("{} could not be loaded", self.key));
-        item.subtitle = Some(self.message.clone());
-        item.accessories.push(self.key.clone());
+        let item = error_item(
+            self.id.clone(),
+            format!("{} could not be loaded", self.key),
+            &self.message,
+            &self.key,
+        );
         stream::once(async move { ItemBatch::from(vec![item]) }).boxed()
     }
 }

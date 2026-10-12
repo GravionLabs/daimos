@@ -14,6 +14,8 @@ pub use manifest::{
     Capabilities, ClipboardAccess, Command, CommandMode, Manifest, Preference, PreferenceKind,
     Runtime, RuntimeTables, ScriptRuntime, WasmRuntime,
 };
-pub use provider::{Backend, CommandProvider, ErrorProvider, StubBackend, providers_for};
+pub use provider::{
+    Backend, CommandProvider, ErrorProvider, StubBackend, error_item, providers_for,
+};
 pub use registry::{ExtensionRecord, ExtensionState, Registry};
 pub use watch::{ExtensionHost, ExtensionWatcher};
