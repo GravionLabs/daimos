@@ -1,5 +1,12 @@
 import { vi } from "vitest";
-import type { Capabilities, Icon, Item, ResultBatch, SettingsView } from "./bindings";
+import type {
+  Capabilities,
+  ExtensionInfo_Serialize as Extension,
+  Icon,
+  Item,
+  ResultBatch,
+  SettingsView,
+} from "./bindings";
 import type { Host } from "./host";
 
 export function settingsView(extra: Partial<SettingsView> = {}): SettingsView {
@@ -18,6 +25,20 @@ export function settingsView(extra: Partial<SettingsView> = {}): SettingsView {
       level: "available",
       reason: null,
     },
+    ...extra,
+  };
+}
+
+export function extensionInfo(extra: Partial<Extension> = {}): Extension {
+  return {
+    name: "notes",
+    title: "Notes",
+    version: "1.0.0",
+    runtime: "script",
+    sandboxed: false,
+    state: "enabled",
+    capabilities: { network: [], filesystem: [], keyring: [] },
+    preferences: [],
     ...extra,
   };
 }
@@ -85,6 +106,10 @@ export function fakeHost() {
     }),
     settings: vi.fn(() => Promise.resolve(settingsView())),
     capabilities: vi.fn(() => Promise.resolve(capabilitiesView())),
+    extensions: vi.fn(() => Promise.resolve({ extensions: [] as Extension[] })),
+    confirmExtension: vi.fn(() => Promise.resolve()),
+    setPreference: vi.fn(() => Promise.resolve()),
+    clearPreference: vi.fn(() => Promise.resolve()),
     setHotkey: vi.fn(() => Promise.resolve(null)),
     setTheme: vi.fn(() => Promise.resolve(settingsView())),
     setProvider: vi.fn(() => Promise.resolve(settingsView())),

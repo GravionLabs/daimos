@@ -105,6 +105,14 @@ const MIGRATIONS: &[&str] = &[
      ALTER TABLE settings ADD COLUMN aliases   TEXT NOT NULL DEFAULT '{}';",
     // 3: the clipboard history (a JSON object).
     "ALTER TABLE settings ADD COLUMN clipboard TEXT NOT NULL DEFAULT '{}';",
+    // 4: the values of extension preferences (text, number, checkbox). Passwords never come here:
+    // they live in the OS keyring.
+    "CREATE TABLE extension_preferences (
+        extension TEXT NOT NULL,
+        name      TEXT NOT NULL,
+        value     TEXT NOT NULL,
+        PRIMARY KEY (extension, name)
+    );",
 ];
 
 /// Reads and writes [`Settings`].
@@ -207,6 +215,66 @@ impl SettingsStore {
     }
 }
 
+/// The values of extension preferences, which live in the same database as the settings.
+impl SettingsStore {
+    fn preference_error(&self) -> impl Fn(rusqlite::Error) -> SettingsError {
+        let path = self.db_path();
+        move |source| SettingsError::Db { path: path.clone(), source }
+    }
+
+    /// All stored preference values of an extension, by preference name.
+    pub fn preference_values(
+        &self,
+        extension: &str,
+    ) -> Result<BTreeMap<String, String>, SettingsError> {
+        let fail = self.preference_error();
+        let db = self.open()?;
+        let mut statement = db
+            .prepare("SELECT name, value FROM extension_preferences WHERE extension = ?1")
+            .map_err(&fail)?;
+        let rows = statement
+            .query_map(params![extension], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+            .map_err(&fail)?;
+        rows.collect::<Result<_, _>>().map_err(fail)
+    }
+
+    /// Stores (or replaces) one preference value.
+    pub fn set_preference(
+        &self,
+        extension: &str,
+        name: &str,
+        value: &str,
+    ) -> Result<(), SettingsError> {
+        self.open()?
+            .execute(
+                "INSERT INTO extension_preferences (extension, name, value) VALUES (?1, ?2, ?3)
+                 ON CONFLICT (extension, name) DO UPDATE SET value = ?3",
+                params![extension, name, value],
+            )
+            .map(drop)
+            .map_err(self.preference_error())
+    }
+
+    /// Removes one preference value; a value that is not stored is fine.
+    pub fn clear_preference(&self, extension: &str, name: &str) -> Result<(), SettingsError> {
+        self.open()?
+            .execute(
+                "DELETE FROM extension_preferences WHERE extension = ?1 AND name = ?2",
+                params![extension, name],
+            )
+            .map(drop)
+            .map_err(self.preference_error())
+    }
+
+    /// Removes every preference value of an extension.
+    pub fn clear_extension_preferences(&self, extension: &str) -> Result<(), SettingsError> {
+        self.open()?
+            .execute("DELETE FROM extension_preferences WHERE extension = ?1", params![extension])
+            .map(drop)
+            .map_err(self.preference_error())
+    }
+}
+
 fn migrate(db: &Connection) -> Result<(), rusqlite::Error> {
     let current: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     for (version, sql) in MIGRATIONS.iter().enumerate().skip(usize::try_from(current).unwrap_or(0))
@@ -306,6 +374,34 @@ mod tests {
         changed.aliases.insert("ff".into(), "Firefox".into());
         store.save(&changed).unwrap();
         assert_eq!(store.load().unwrap().aliases["ff"], "Firefox");
+    }
+
+    #[test]
+    fn preference_values_are_stored_per_extension_and_replaced() {
+        let (_dir, store) = store();
+        assert!(store.preference_values("gh").unwrap().is_empty());
+        store.set_preference("gh", "user", "ada").unwrap();
+        store.set_preference("gh", "limit", "5").unwrap();
+        store.set_preference("other", "user", "bob").unwrap();
+        store.set_preference("gh", "user", "grace").unwrap();
+        let values = store.preference_values("gh").unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!((values["user"].as_str(), values["limit"].as_str()), ("grace", "5"));
+        assert_eq!(store.preference_values("other").unwrap()["user"], "bob");
+    }
+
+    #[test]
+    fn preference_values_can_be_cleared_one_by_one_or_per_extension() {
+        let (_dir, store) = store();
+        store.set_preference("gh", "a", "1").unwrap();
+        store.set_preference("gh", "b", "2").unwrap();
+        store.set_preference("other", "a", "3").unwrap();
+        store.clear_preference("gh", "a").unwrap();
+        store.clear_preference("gh", "missing").unwrap();
+        assert_eq!(store.preference_values("gh").unwrap().keys().collect::<Vec<_>>(), ["b"]);
+        store.clear_extension_preferences("gh").unwrap();
+        assert!(store.preference_values("gh").unwrap().is_empty());
+        assert_eq!(store.preference_values("other").unwrap().len(), 1);
     }
 
     #[test]

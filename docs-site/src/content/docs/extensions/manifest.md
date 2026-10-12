@@ -87,6 +87,30 @@ extensions, which run with your rights.
 | `clipboard`  | `read`, `write`, or `read-write`                                 |
 | `keyring`    | Names of secrets it may read from the OS keyring                 |
 
+### Confirmation and updates
+
+An extension does not run until you confirm its capabilities. Daimos stores what you confirmed, with
+the version, in `.consent.json` inside the extension folder, outside the manifest. Until then the
+extension is listed as `needs-confirmation`, runs nothing, and shows no results.
+
+When a new version of the manifest asks for more than you confirmed, the extension is disabled again
+until you confirm the new set. These count as more: a new network host, a new path, a path with a
+wider mode (`:rw` where you confirmed `:ro`; a path without a suffix counts as `:ro`), wider
+clipboard access, and a new keyring entry. A new version that only removes capabilities keeps
+running, and so does an edit that changes nothing in `[capabilities]`.
+
+### In the settings
+
+The **Extensions** section of the settings lists every extension with its version, its state, and
+a label for its runtime: `Runs unsandboxed` for a script extension, `Sandboxed` for a wasm
+extension. Under each one you see the capabilities it declares, one per line (files with read only
+or read and write, network hosts, clipboard access, keyring entries).
+
+An extension that needs a confirmation shows a **Confirm** button. After an update, the
+capabilities that are new compared with what you confirmed are marked `(new)`. Nothing runs until
+you press the button; it does the same as `daimos ext confirm`, see
+[extension commands](../cli/#confirm-an-update).
+
 ## `[[preferences]]`
 
 Settings you fill in for the extension.
@@ -97,6 +121,27 @@ Settings you fill in for the extension.
 | `title`    | yes      | Label shown to you                                                   |
 | `type`     | yes      | `text`, `password` (kept in the OS keyring), `number`, or `checkbox` |
 | `required` | no       | The extension cannot run until it is set (default `false`)           |
+
+### Where the values are stored
+
+You set the values in the settings. `text`, `number`, and `checkbox` values are stored in Daimos's
+settings database. `password` values never go there: they are stored in the OS keyring, with the
+service `daimos` and the user `<extension name>/<preference name>` (for example
+`github-repos/token`), and read from it each time a query runs. They do not appear in logs or in
+`daimos ext list`.
+
+- **Linux** needs a running Secret Service, such as GNOME Keyring or KWallet. Without one, a
+  required password preference makes the extension answer with a message that the OS keyring is not
+  available; start the service and set the value again.
+- **Windows** uses the Credential Manager and **macOS** uses the Keychain.
+
+A required preference without a value stops the extension from running: its result names the
+missing preference.
+
+The settings page shows the preferences of each extension as a form under its capabilities:
+text and number fields, a checkbox, and for a password a masked field that stays empty and only
+says `Set` or `Not set`. Required preferences are marked `(required)`. Type a new password and
+press **Save** to replace it, or **Clear** to remove it.
 
 ## How commands and keywords route queries
 

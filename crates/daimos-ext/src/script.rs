@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use daimos_core::model::{self, ItemBatch};
@@ -17,7 +17,8 @@ use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::dir::{self, LoadedExtension};
-use crate::manifest::{Runtime, ScriptRuntime};
+use crate::manifest::{Manifest, Runtime, ScriptRuntime};
+use crate::preferences::Preferences;
 use crate::protocol::{self, Request, Response};
 use crate::provider::Backend;
 
@@ -325,6 +326,10 @@ pub struct ScriptBackend {
     runners: RwLock<BTreeMap<String, OneShot>>,
     /// Where `logs/<extension>.log` goes; no logging without it.
     data_dir: Option<PathBuf>,
+    /// The manifests of the loaded extensions, for their preferences.
+    manifests: RwLock<BTreeMap<String, Manifest>>,
+    /// Where the preference values come from; queries carry none without it.
+    preferences: Option<Arc<Preferences>>,
 }
 
 impl ScriptBackend {
@@ -335,6 +340,14 @@ impl ScriptBackend {
     /// A backend that writes the stderr of scripts to `<data_dir>/logs/<extension>.log`.
     pub fn with_data_dir(data_dir: PathBuf) -> Self {
         Self { data_dir: Some(data_dir), ..Self::default() }
+    }
+
+    /// Fills the `preferences` of every query from `preferences`, passwords read from the keyring
+    /// at call time.
+    #[must_use]
+    pub fn with_preferences(mut self, preferences: Arc<Preferences>) -> Self {
+        self.preferences = Some(preferences);
+        self
     }
 
     fn runner(&self, extension: &str) -> Option<OneShot> {
@@ -352,6 +365,10 @@ impl Backend for ScriptBackend {
         let Some(runner) = self.runner(extension) else {
             return stream::empty().boxed();
         };
+        let extension = extension.to_owned();
+        let manifest =
+            self.manifests.read().unwrap_or_else(|e| e.into_inner()).get(&extension).cloned();
+        let store = self.preferences.clone();
         let command = command.to_owned();
         let QueryContext { text, cancel, .. } = ctx;
         // A newer keystroke cancels this query during the delay, so no process starts for it.
@@ -365,15 +382,33 @@ impl Backend for ScriptBackend {
                 }
             }
         };
-        stream::once(wait)
-            .flat_map(move |go| {
-                if go {
-                    runner.query_batches(&command, &text, BTreeMap::new(), cancel.clone())
-                } else {
-                    stream::empty().boxed()
+        stream::once(async move {
+            if !wait.await {
+                return stream::empty().boxed();
+            }
+            let preferences = match (store, manifest) {
+                (Some(store), Some(manifest)) if !manifest.preferences.is_empty() => {
+                    // The keyring can block, so it is read off the async threads.
+                    match tokio::task::spawn_blocking(move || store.resolve(&manifest)).await {
+                        Ok(Ok(values)) => values,
+                        Ok(Err(error)) => {
+                            let item = crate::provider::error_item(
+                                format!("{extension}.preferences"),
+                                format!("{extension} needs its preferences"),
+                                &error.to_string(),
+                                &extension,
+                            );
+                            return stream::iter([ItemBatch::from(vec![item])]).boxed();
+                        }
+                        Err(_) => BTreeMap::new(),
+                    }
                 }
-            })
-            .boxed()
+                _ => BTreeMap::new(),
+            };
+            runner.query_batches(&command, &text, preferences, cancel)
+        })
+        .flatten()
+        .boxed()
     }
 
     fn custom_action(
@@ -403,6 +438,10 @@ impl Backend for ScriptBackend {
     fn load(&self, extension: &LoadedExtension) {
         let manifest = &extension.manifest;
         let name = &manifest.extension.name;
+        self.manifests
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(name.clone(), manifest.clone());
         let mut runners = self.runners.write().unwrap_or_else(|e| e.into_inner());
         runners.remove(name);
         let script = match (&manifest.runtime.script, manifest.extension.runtime) {
@@ -418,6 +457,7 @@ impl Backend for ScriptBackend {
 
     fn unload(&self, name: &str) {
         self.runners.write().unwrap_or_else(|e| e.into_inner()).remove(name);
+        self.manifests.write().unwrap_or_else(|e| e.into_inner()).remove(name);
     }
 }
 
@@ -974,6 +1014,7 @@ mod tests {
              long_running = {long_running}\n"
         );
         std::fs::write(dir.join("extension.toml"), manifest).unwrap();
+        crate::consent::confirm(&dir).unwrap();
         dir::load_extension(&dir).unwrap()
     }
 
@@ -1073,6 +1114,66 @@ mod tests {
         let [batch] = batches.as_slice() else { panic!("{batches:?}") };
         assert_eq!(batch.items[0].title, "hi");
         assert_eq!(batch.items[0].accessories, ["Demo"], "labeled with the extension title");
+    }
+
+    /// Installs `demo` with a required password and a text preference; the script answers with
+    /// the preferences it received.
+    fn install_with_preferences(root: &Path, python: &str) -> LoadedExtension {
+        let loaded = install(
+            root,
+            python,
+            false,
+            &format!(
+                "{PRELUDE}send({{'id': request['id'], 'type': 'items', 'done': True, 'items': \
+                 [{{'id': 't', 'title': json.dumps(request['preferences'], sort_keys=True)}}]}})\n"
+            ),
+        );
+        let path = loaded.dir.join("extension.toml");
+        let mut manifest = std::fs::read_to_string(&path).unwrap();
+        manifest.push_str(
+            "\n[[preferences]]\nname = \"token\"\ntitle = \"T\"\ntype = \"password\"\nrequired = true\n\
+             \n[[preferences]]\nname = \"user\"\ntitle = \"U\"\ntype = \"text\"\n",
+        );
+        std::fs::write(&path, manifest).unwrap();
+        crate::consent::confirm(&loaded.dir).unwrap();
+        dir::load_extension(&loaded.dir).unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_query_carries_the_preferences_with_the_password_from_the_keyring() {
+        let python = python_or_skip!();
+        let root = tempfile::tempdir().unwrap();
+        let secrets = Arc::new(crate::secrets::MockSecretStore::new());
+        let preferences = Arc::new(Preferences::new(
+            daimos_core::settings::SettingsStore::new(root.path().join("config")),
+            secrets.clone(),
+        ));
+        let backend = ScriptBackend::new().with_preferences(Arc::clone(&preferences));
+        let loaded = install_with_preferences(root.path(), python);
+        backend.load(&loaded);
+        let cancel = CancellationToken::new();
+
+        // Required and unset: no process runs, one error item names the preference.
+        let batches: Vec<_> = query_of(&backend, "x", &cancel).collect().await;
+        let [batch] = batches.as_slice() else { panic!("{batches:?}") };
+        assert_eq!(batch.items[0].title, "demo needs its preferences");
+        assert!(batch.items[0].subtitle.as_deref().unwrap().contains("token"));
+
+        preferences.set(&loaded.manifest, "token", "s3cret").unwrap();
+        preferences.set(&loaded.manifest, "user", "ada").unwrap();
+        let batches: Vec<_> = query_of(&backend, "x", &cancel).collect().await;
+        let [batch] = batches.as_slice() else { panic!("{batches:?}") };
+        assert_eq!(batch.items[0].title, r#"{"token": "s3cret", "user": "ada"}"#);
+
+        // A keyring that disappears is reported, not ignored.
+        let broken = Arc::new(Preferences::new(
+            daimos_core::settings::SettingsStore::new(root.path().join("config")),
+            Arc::new(crate::secrets::MockSecretStore::unavailable()),
+        ));
+        let backend = ScriptBackend::new().with_preferences(broken);
+        backend.load(&loaded);
+        let batches: Vec<_> = query_of(&backend, "x", &cancel).collect().await;
+        assert!(batches[0].items[0].subtitle.as_deref().unwrap().contains("OS keyring"));
     }
 
     #[tokio::test]

@@ -3,6 +3,17 @@ import type { Item, ResultBatch } from "./bindings";
 /** Rows the list shows at once; the window is sized for this many (see `height_for` in Rust). */
 export const VIEWPORT_ROWS = 8;
 
+/** The text of the badge on results of a script extension. */
+export const UNSANDBOXED_LABEL = "Runs unsandboxed";
+
+/**
+ * Whether the item comes from a script extension, which runs with the user's rights. Wasm items
+ * (`true`) and the built-in ones (`null`/missing) get no badge.
+ */
+export function runsUnsandboxed(item: Item | null | undefined): boolean {
+  return item?.sandboxed === false;
+}
+
 /** The one query session of the palette window. */
 export const SESSION = 1;
 

@@ -132,7 +132,28 @@ fn setup_extensions(app: &tauri::App) {
             ScriptBackend::new()
         }
     };
-    let host = Arc::new(ExtensionHost::new(root, Arc::new(backend), registry));
+    // Preference values: text in the settings database, passwords in the OS keyring.
+    let preferences = match app.path().app_config_dir() {
+        Ok(config_dir) => Some(Arc::new(daimos_ext::Preferences::new(
+            SettingsStore::new(config_dir),
+            Arc::new(daimos_ext::OsSecretStore),
+        ))),
+        Err(error) => {
+            log::warn!("no config directory, extension preferences are off: {error}");
+            None
+        }
+    };
+    let backend = match &preferences {
+        Some(preferences) => backend.with_preferences(Arc::clone(preferences)),
+        None => backend,
+    };
+    let mut host = ExtensionHost::new(root, Arc::new(backend), registry);
+    if let Some(preferences) = preferences {
+        host = host.with_preferences(preferences);
+    }
+    let host = Arc::new(host);
+    // The UI lists, confirms and configures extensions through the host.
+    app.manage(Arc::clone(&host));
     match host.watch(std::time::Duration::from_millis(250)) {
         Ok(watcher) => {
             app.manage(watcher);

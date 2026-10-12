@@ -1,6 +1,7 @@
-import { For, Match, Switch } from "solid-js";
+import { For, Match, Show, Switch } from "solid-js";
 import type { Detail } from "./bindings";
 import { type Block, type Inline, parseMarkdown } from "./markdown";
+import { UNSANDBOXED_LABEL } from "./results";
 
 function Inlines(props: { inlines: Inline[] }) {
   return (
@@ -56,9 +57,20 @@ function BlockView(props: { block: Block }) {
 }
 
 /** The detail of an item: Markdown text, key/value metadata or a picture. */
-export function DetailPane(props: { detail: Detail | null }) {
+export function DetailPane(props: {
+  detail: Detail | null;
+  /** The item comes from a script extension: the header says so. */
+  unsandboxed?: boolean;
+}) {
   return (
     <aside class="detail" aria-label="Detail">
+      <Show when={props.unsandboxed}>
+        <p class="detail-header">
+          <span class="badge" data-sandboxed="false">
+            {UNSANDBOXED_LABEL}
+          </span>
+        </p>
+      </Show>
       <Switch fallback={<p class="empty">No detail</p>}>
         <Match
           when={

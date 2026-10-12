@@ -36,6 +36,12 @@ fn manifest(keyword: &str) -> String {
 fn write(root: &Path, content: &str) {
     std::fs::create_dir_all(root.join("ext")).unwrap();
     std::fs::write(root.join("ext").join("extension.toml"), content).unwrap();
+    // The empty set of capabilities is confirmed, so the extension may run.
+    std::fs::write(
+        root.join("ext").join(".consent.json"),
+        r#"{"version":"1.0.0","capabilities":{}}"#,
+    )
+    .unwrap();
 }
 
 struct Setup {

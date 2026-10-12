@@ -513,3 +513,89 @@ input[type="radio"] {
   color: var(--muted);
   font-size: 0.75rem;
 }
+
+.extensions li.extension {
+  display: block;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--selected);
+}
+
+.extension-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.extension .version,
+.extension .state {
+  color: var(--muted);
+  font-size: 0.8125rem;
+}
+
+/* The label is text, so it does not rely on color; the border only adds emphasis. */
+.badge {
+  padding: 1px 6px;
+  border: 1px solid var(--selected);
+  border-radius: 6px;
+  font-size: 0.75rem;
+}
+
+.badge[data-sandboxed="false"] {
+  border-color: var(--error);
+  color: var(--error);
+}
+
+.settings ul.capability-list {
+  margin: 4px 0;
+  font-size: 0.8125rem;
+}
+
+.capability-list li[data-new="true"] {
+  font-weight: 600;
+}
+
+.new-tag,
+.required {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.preferences {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.preference {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.preference input[type="text"],
+.preference input[type="password"] {
+  padding: 4px 8px;
+  border: 1px solid var(--selected);
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.secret-state {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
+.row .badge {
+  flex: none;
+}
+
+.detail-header {
+  margin: 0 0 8px;
+}

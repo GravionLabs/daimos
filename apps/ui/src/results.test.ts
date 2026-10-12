@@ -4,9 +4,11 @@ import {
   emptyResults,
   highlightRuns,
   move,
+  runsUnsandboxed,
   scrollInto,
   selectAt,
   selectedIndex,
+  UNSANDBOXED_LABEL,
   VIEWPORT_ROWS,
 } from "./results";
 
@@ -155,5 +157,20 @@ describe("highlightRuns", () => {
   it("returns one plain run without matches", () => {
     expect(highlightRuns("Calc")).toEqual([{ text: "Calc", hit: false }]);
     expect(highlightRuns("")).toEqual([]);
+  });
+});
+
+describe("runsUnsandboxed", () => {
+  it("is true only for the items of a script extension", () => {
+    expect(runsUnsandboxed({ ...item("a"), sandboxed: false })).toBe(true);
+    expect(runsUnsandboxed({ ...item("a"), sandboxed: true })).toBe(false);
+    expect(runsUnsandboxed({ ...item("a"), sandboxed: null })).toBe(false);
+    expect(runsUnsandboxed(item("a"))).toBe(false);
+    expect(runsUnsandboxed(undefined)).toBe(false);
+    expect(runsUnsandboxed(null)).toBe(false);
+  });
+
+  it("has the label that the settings and the docs use", () => {
+    expect(UNSANDBOXED_LABEL).toBe("Runs unsandboxed");
   });
 });

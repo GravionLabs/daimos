@@ -13,6 +13,7 @@ import {
   primaryAction,
   providerOf,
   type Results,
+  runsUnsandboxed,
   SESSION,
   scrollInto,
   selectAt,
@@ -374,7 +375,10 @@ export function App(props: { host?: Host }) {
         onRun={(index) => runPrimary(list().results.items[index])}
       />
       <Show when={showDetail()}>
-        <DetailPane detail={selectedItem()?.detail ?? null} />
+        <DetailPane
+          detail={selectedItem()?.detail ?? null}
+          unsandboxed={runsUnsandboxed(selectedItem())}
+        />
       </Show>
     </div>
   );
