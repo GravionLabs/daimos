@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+use daimos_core::ipc::{ExtensionInfo, ExtensionList};
 use daimos_core::provider::Provider;
 
 use crate::manifest::{Manifest, Runtime};
@@ -111,6 +112,25 @@ impl Registry {
         extensions.values().map(|entry| entry.record.clone()).collect()
     }
 
+    /// The extensions as `daimos ext list` answers over the socket.
+    pub fn ipc_list(&self) -> ExtensionList {
+        let extensions = self
+            .list()
+            .into_iter()
+            .map(|record| ExtensionInfo {
+                name: record.name,
+                version: record.version,
+                runtime: record.runtime.map(|r| r.as_str().to_owned()),
+                state: record.state.label().to_owned(),
+                message: match record.state {
+                    ExtensionState::Error(message) => Some(message),
+                    ExtensionState::Enabled => None,
+                },
+            })
+            .collect();
+        ExtensionList { extensions }
+    }
+
     pub fn record(&self, key: &str) -> Option<ExtensionRecord> {
         let extensions = self.extensions.read().unwrap_or_else(|e| e.into_inner());
         extensions.get(key).map(|entry| entry.record.clone())
@@ -191,5 +211,21 @@ mod tests {
         assert_eq!(gh.runtime, Some(Runtime::Script));
         assert_eq!(gh.state.label(), "enabled");
         assert_eq!(broken.state.label(), "error");
+    }
+
+    #[test]
+    fn the_ipc_list_carries_state_and_the_error_message() {
+        let registry = Registry::new();
+        assert!(registry.ipc_list().extensions.is_empty());
+        put(&registry, "gh", r#"["gh"]"#);
+        registry.replace(ExtensionRecord::failed("broken", "bad".into()), Vec::new());
+        let list = registry.ipc_list().extensions;
+        assert_eq!(list[0].name, "broken");
+        assert_eq!((list[0].state.as_str(), list[0].message.as_deref()), ("error", Some("bad")));
+        assert_eq!(list[0].runtime, None);
+        assert_eq!(list[1].name, "gh");
+        assert_eq!(list[1].runtime.as_deref(), Some("script"));
+        assert_eq!(list[1].version.as_deref(), Some("1.0.0"));
+        assert_eq!((list[1].state.as_str(), list[1].message.as_deref()), ("enabled", None));
     }
 }

@@ -63,3 +63,4 @@ list` shows the state of every extension, see the [manifest reference](manifest/
 ## Pages
 
 - [Manifest reference](manifest/): the sections and fields of `extension.toml`.
+- [Extension commands](cli/): `daimos ext list` shows the installed extensions and their state.

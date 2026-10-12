@@ -14,6 +14,16 @@ pub enum Runtime {
     Wasm,
 }
 
+impl Runtime {
+    /// `script` or `wasm`, as written in the manifest.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Script => "script",
+            Self::Wasm => "wasm",
+        }
+    }
+}
+
 /// Whether a command shows a list or runs and exits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "kebab-case")]

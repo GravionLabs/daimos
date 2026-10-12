@@ -987,6 +987,7 @@ name = "daimos-app"
 version = "0.1.0"
 dependencies = [
  "daimos-core",
+ "daimos-ext",
  "daimos-platform",
  "log",
  "serde",

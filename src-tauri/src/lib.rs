@@ -45,6 +45,7 @@ pub fn run() {
             }
             setup_clipboard(app)?;
             setup_query_engine(app)?;
+            setup_extensions(app);
             setup_hotkey(app, started)?;
             start_index_in_background(app);
             ipc_server::start(app.handle());
@@ -105,6 +106,26 @@ fn setup_query_engine(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>
     app.manage(engine);
     app.manage(index);
     Ok(())
+}
+
+/// Loads the extensions and reloads them when their files change. The runtimes that answer queries
+/// are not there yet, so the commands return nothing for now; the list is available to the CLI.
+fn setup_extensions(app: &tauri::App) {
+    use daimos_ext::{ExtensionHost, Registry, StubBackend};
+
+    let Some(root) = daimos_ext::dir::extensions_dir() else {
+        log::warn!("no config directory, extensions are off");
+        return;
+    };
+    let registry = Arc::new(Registry::new());
+    app.manage(Arc::clone(&registry));
+    let host = Arc::new(ExtensionHost::new(root, Arc::new(StubBackend), registry));
+    match host.watch(std::time::Duration::from_millis(250)) {
+        Ok(watcher) => {
+            app.manage(watcher);
+        }
+        Err(error) => log::warn!("cannot watch the extension directory: {error}"),
+    }
 }
 
 /// Opens the clipboard history and starts following the clipboard when the setting is on.
@@ -175,6 +196,9 @@ fn shutdown(app: &tauri::AppHandle) {
     }
     if let Some(index) = app.try_state::<Arc<daimos_core::index::IndexService>>() {
         index.stop();
+    }
+    if let Some(watcher) = app.try_state::<daimos_ext::ExtensionWatcher>() {
+        watcher.stop();
     }
     if let Some(hotkey) = app.try_state::<Arc<HotkeyService>>() {
         let _ = hotkey.release();

@@ -12,6 +12,9 @@ description: Control the running Daimos with the daimos command.
 | `daimos hide`               | Hide the window.                                              |
 | `daimos quit`               | Quit the running Daimos.                                      |
 | `daimos index …`            | Work with the application index.                              |
+| `daimos ext list`           | List the extensions with version, runtime, and state.         |
+
+`daimos ext list` is described in [Extension commands](../../extensions/cli/).
 
 Run `daimos --help` for the options of each command. `daimos toggle` is how you bind Daimos to a key
 on compositors without the GlobalShortcuts portal, see [Wayland setup](../../platforms/wayland/).
