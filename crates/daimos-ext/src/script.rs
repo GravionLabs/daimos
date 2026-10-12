@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use daimos_core::model::{self, ItemBatch};
@@ -127,17 +127,24 @@ impl OneShot {
         preferences: BTreeMap<String, String>,
         cancel: CancellationToken,
     ) -> BoxStream<'static, ItemBatch> {
-        let extension = self.extension.clone();
-        self.query(command, text, preferences, cancel)
-            .map(move |event| match event {
-                Event::Items(items) => ItemBatch::from(items),
-                Event::Failed(failure) => ItemBatch::from(vec![failure_item(&extension, &failure)]),
-            })
-            .boxed()
+        batches(&self.extension, self.query(command, text, preferences, cancel))
     }
 
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    pub(crate) fn extension(&self) -> &str {
+        &self.extension
+    }
+
+    /// The program as the manifest names it, for messages.
+    pub(crate) fn command_name(&self) -> &str {
+        &self.command[0]
+    }
+
+    pub(crate) fn log_path(&self) -> Option<PathBuf> {
+        self.log.clone()
     }
 
     /// Starts the script for one query and streams what it answers. The process starts when the
@@ -220,7 +227,7 @@ impl OneShot {
 
     /// The program path: a relative path with a separator is relative to the extension directory
     /// on every platform.
-    fn program(&self) -> PathBuf {
+    pub(crate) fn program(&self) -> PathBuf {
         let program = Path::new(&self.command[0]);
         if program.is_relative() && self.command[0].contains(['/', '\\']) {
             self.dir.join(program)
@@ -229,7 +236,7 @@ impl OneShot {
         }
     }
 
-    fn spawn(&self) -> std::io::Result<Child> {
+    pub(crate) fn spawn(&self) -> std::io::Result<Child> {
         let mut command = Command::new(self.program());
         command
             .args(&self.command[1..])
@@ -461,6 +468,21 @@ impl Backend for ScriptBackend {
     }
 }
 
+/// The events of a query as batches for a provider: a failure becomes one error item after the
+/// items that came before it.
+pub(crate) fn batches(
+    extension: &str,
+    events: BoxStream<'static, Event>,
+) -> BoxStream<'static, ItemBatch> {
+    let extension = extension.to_owned();
+    events
+        .map(move |event| match event {
+            Event::Items(items) => ItemBatch::from(items),
+            Event::Failed(failure) => ItemBatch::from(vec![failure_item(&extension, &failure)]),
+        })
+        .boxed()
+}
+
 /// The error item of a failed run.
 pub fn failure_item(extension: &str, failure: &Failure) -> model::Item {
     let title = match failure {
@@ -478,11 +500,22 @@ pub fn failure_item(extension: &str, failure: &Failure) -> model::Item {
 /// Appends the lines of `stderr` to the log (when there is one) and returns the last non-empty
 /// line. A log that cannot be written is given up on; the run does not notice.
 async fn pump_stderr(stderr: impl AsyncRead + Unpin, log: Option<PathBuf>) -> Option<String> {
+    let last = Arc::new(Mutex::new(None));
+    pump_stderr_into(stderr, log, &last).await;
+    last.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// Like [`pump_stderr`], and keeps the last non-empty line in `last` while it reads, so a
+/// long-running process can be asked for it at any time.
+pub(crate) async fn pump_stderr_into(
+    stderr: impl AsyncRead + Unpin,
+    log: Option<PathBuf>,
+    last: &Mutex<Option<String>>,
+) {
     let mut file = match log {
         Some(path) => open_log(&path).await,
         None => None,
     };
-    let mut last = None;
     let mut lines = BufReader::new(stderr).lines();
     let mut written = 0_u64;
     while let Ok(Some(line)) = lines.next_line().await {
@@ -495,10 +528,9 @@ async fn pump_stderr(stderr: impl AsyncRead + Unpin, log: Option<PathBuf>) -> Op
             }
         }
         if !line.trim().is_empty() {
-            last = Some(line.trim().to_owned());
+            *last.lock().unwrap_or_else(|e| e.into_inner()) = Some(line.trim().to_owned());
         }
     }
-    last
 }
 
 /// Opens the log for appending, creating its folder and moving an oversized log aside.

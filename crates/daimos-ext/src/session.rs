@@ -1,0 +1,599 @@
+//! Running a script extension in long-running mode: one process that serves many requests.
+//!
+//! The process starts at the first request and stays alive. Every request carries an id from one
+//! counter per session; a reader task routes each response to the request that waits for it, so
+//! interleaved answers reach the right query. A query that is superseded sends `cancel` and its
+//! late answers are dropped. The tasks of a process run on a tokio runtime that outlives the
+//! requests (see [`Session::bind_current`]).
+
+use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::time::Duration;
+
+use daimos_core::model::{self, ItemBatch};
+use futures::StreamExt;
+use futures::stream::{self, BoxStream};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::process::{Child, ChildStdin, ChildStdout};
+use tokio::runtime::Handle;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::watch;
+use tokio::task::JoinHandle;
+use tokio::time::{Instant, sleep_until, timeout};
+use tokio_util::sync::CancellationToken;
+
+use crate::manifest::ScriptRuntime;
+use crate::protocol::{self, Request, Response};
+use crate::script::{Event, Failure, OneShot, batches, pump_stderr_into};
+
+/// How long the end of a process waits for its stderr to drain.
+const STDERR_GRACE: Duration = Duration::from_millis(500);
+
+/// A closed output pipe is given this long to be followed by the exit before the process is killed.
+const EOF_GRACE: Duration = Duration::from_millis(200);
+
+/// How often a request retries when the process it picked turned out to be dying.
+const ATTEMPTS: usize = 3;
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// How a process ended.
+#[derive(Debug, Clone, Copy)]
+struct Exit {
+    code: Option<i32>,
+}
+
+/// The requests that wait for an answer, by id; `None` once the output of the process has ended.
+type Pending = Option<HashMap<u64, UnboundedSender<Response>>>;
+
+/// The requests in flight and the time of the last traffic.
+struct Activity {
+    /// Set when the process is gone or about to be: no request may register any more.
+    dead: bool,
+    in_flight: usize,
+    last: Instant,
+}
+
+/// One running process and the handles to talk to it.
+struct Proc {
+    pending: Mutex<Pending>,
+    writer: UnboundedSender<String>,
+    /// Kill the process (the supervisor does it).
+    kill: CancellationToken,
+    /// Whether the end of the process was asked for (by a timeout, a shutdown), as opposed to a
+    /// crash.
+    deliberate: AtomicBool,
+    activity: Mutex<Activity>,
+    exit: watch::Receiver<Option<Exit>>,
+    stderr_last: Arc<Mutex<Option<String>>>,
+    protocol_error: Mutex<Option<String>>,
+}
+
+impl Proc {
+    /// Registers request `id`; `None` when the process can take no more requests.
+    fn begin(&self, id: u64) -> Option<UnboundedReceiver<Response>> {
+        let mut activity = lock(&self.activity);
+        if activity.dead {
+            return None;
+        }
+        let mut pending = lock(&self.pending);
+        let (tx, rx) = unbounded_channel();
+        pending.as_mut()?.insert(id, tx);
+        activity.in_flight += 1;
+        activity.last = Instant::now();
+        Some(rx)
+    }
+
+    /// Forgets request `id`: its late answers are dropped.
+    fn end(&self, id: u64) {
+        if let Some(map) = lock(&self.pending).as_mut() {
+            map.remove(&id);
+        }
+        let mut activity = lock(&self.activity);
+        activity.in_flight = activity.in_flight.saturating_sub(1);
+        activity.last = Instant::now();
+    }
+
+    fn send(&self, request: &Request) {
+        // A closed channel means the process is gone; the request learns it from its own channel.
+        let _ = self.writer.send(protocol::encode_line(request));
+    }
+
+    fn route(&self, response: Response) {
+        lock(&self.activity).last = Instant::now();
+        let id = response.id();
+        let last = match &response {
+            Response::Items { done, .. } => *done,
+            Response::Result { .. } => true,
+        };
+        let mut pending = lock(&self.pending);
+        let Some(map) = pending.as_mut() else { return };
+        // An unknown id is a late answer to a cancelled request: dropped.
+        if let Some(tx) = map.get(&id)
+            && (tx.send(response).is_err() || last)
+        {
+            map.remove(&id);
+        }
+    }
+
+    /// The output has ended: nobody waits for an answer any more.
+    fn close_pending(&self) {
+        *lock(&self.pending) = None;
+    }
+
+    /// Asks for the end of the process.
+    fn stop(&self) {
+        self.deliberate.store(true, Ordering::SeqCst);
+        self.kill.cancel();
+    }
+
+    /// Waits until the supervisor has seen the process end.
+    async fn wait_exit(&self) -> Exit {
+        let mut exit = self.exit.clone();
+        match exit.wait_for(Option::is_some).await {
+            Ok(value) => (*value).unwrap_or(Exit { code: None }),
+            Err(_) => Exit { code: None },
+        }
+    }
+
+    async fn failure(&self) -> Failure {
+        let exit = self.wait_exit().await;
+        if let Some(message) = lock(&self.protocol_error).clone() {
+            return Failure::Protocol(message);
+        }
+        Failure::Exit { code: exit.code, stderr: lock(&self.stderr_last).clone() }
+    }
+}
+
+/// The tasks that belong to a process: write requests, read responses, and own the child.
+async fn write_loop(mut stdin: ChildStdin, mut lines: UnboundedReceiver<String>) {
+    while let Some(line) = lines.recv().await {
+        if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
+            break;
+        }
+    }
+}
+
+async fn read_loop(stdout: ChildStdout, proc: Arc<Proc>, eof: CancellationToken) {
+    let mut lines = BufReader::new(stdout).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        match protocol::parse_line::<Response>(&line) {
+            Ok(None) => {}
+            Ok(Some(response)) => proc.route(response),
+            Err(error) => {
+                *lock(&proc.protocol_error) = Some(error.to_string());
+                proc.stop_as_crash();
+                break;
+            }
+        }
+    }
+    proc.close_pending();
+    eof.cancel();
+}
+
+impl Proc {
+    /// Kills the process without calling it deliberate: the script broke the protocol.
+    fn stop_as_crash(&self) {
+        self.kill.cancel();
+    }
+}
+
+async fn supervise(
+    mut child: Child,
+    proc: Arc<Proc>,
+    eof: CancellationToken,
+    stderr: JoinHandle<()>,
+    exit: watch::Sender<Option<Exit>>,
+) {
+    let status = tokio::select! {
+        status = child.wait() => status,
+        () = proc.kill.cancelled() => {
+            let _ = child.kill().await;
+            child.wait().await
+        }
+        () = eof.cancelled() => match timeout(EOF_GRACE, child.wait()).await {
+            Ok(status) => status,
+            Err(_) => {
+                let _ = child.kill().await;
+                child.wait().await
+            }
+        },
+    };
+    lock(&proc.activity).dead = true;
+    proc.close_pending();
+    let _ = timeout(STDERR_GRACE, stderr).await;
+    let code = status.ok().and_then(|status| status.code());
+    let _ = exit.send(Some(Exit { code }));
+}
+
+/// A background runtime for sessions that are first used outside any runtime of the app.
+struct Fallback {
+    handle: Handle,
+    /// Dropping the sender ends the thread and with it the runtime and its processes.
+    _stop: tokio::sync::oneshot::Sender<()>,
+}
+
+fn fallback() -> std::io::Result<Fallback> {
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+    let handle = runtime.handle().clone();
+    let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    std::thread::Builder::new().name("daimos-script-session".into()).spawn(move || {
+        runtime.block_on(async {
+            let _ = stopped.await;
+        });
+    })?;
+    Ok(Fallback { handle, _stop: stop })
+}
+
+struct Inner {
+    spec: OneShot,
+    timeout: Duration,
+    next_id: AtomicU64,
+    /// Serializes starting a process.
+    gate: tokio::sync::Mutex<()>,
+    current: Mutex<Option<Arc<Proc>>>,
+    closed: AtomicBool,
+    bound: Mutex<Option<Handle>>,
+    fallback: OnceLock<Option<Fallback>>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        if let Some(proc) = lock(&self.current).take() {
+            proc.stop();
+        }
+    }
+}
+
+/// The long-running process of one script extension. Cloning shares the process.
+#[derive(Clone)]
+pub struct Session {
+    inner: Arc<Inner>,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session").field("extension", &self.inner.spec.extension()).finish()
+    }
+}
+
+impl Session {
+    /// A session for `runtime` of the extension called `extension` in `dir`. No process starts
+    /// before the first request.
+    pub fn new(extension: &str, dir: PathBuf, runtime: &ScriptRuntime) -> Self {
+        Self::from_spec(OneShot::new(extension, dir, runtime))
+    }
+
+    fn from_spec(spec: OneShot) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                timeout: spec.timeout(),
+                spec,
+                next_id: AtomicU64::new(0),
+                gate: tokio::sync::Mutex::new(()),
+                current: Mutex::new(None),
+                closed: AtomicBool::new(false),
+                bound: Mutex::new(None),
+                fallback: OnceLock::new(),
+            }),
+        }
+    }
+
+    /// Appends the stderr of the process to `path` (`<data dir>/logs/<extension>.log`).
+    #[must_use]
+    pub fn with_log(self, path: PathBuf) -> Self {
+        Self::from_spec(OneShot::clone(&self.inner.spec).with_log(path))
+    }
+
+    /// Runs the tasks of the process on the runtime the caller is in. Queries do this on their
+    /// first poll; a session that is only used through [`action`](Self::action) runs on a
+    /// background thread of its own.
+    pub fn bind_current(&self) {
+        let mut bound = lock(&self.inner.bound);
+        if bound.is_none() {
+            *bound = Handle::try_current().ok();
+        }
+    }
+
+    /// Stops the process and makes every later request end without an answer.
+    pub fn shutdown(&self) {
+        self.inner.closed.store(true, Ordering::SeqCst);
+        if let Some(proc) = lock(&self.inner.current).take() {
+            proc.stop();
+        }
+    }
+
+    fn handle(&self) -> Result<Handle, Failure> {
+        if let Some(handle) = lock(&self.inner.bound).clone() {
+            return Ok(handle);
+        }
+        self.inner
+            .fallback
+            .get_or_init(|| {
+                fallback()
+                    .map_err(|error| log::warn!("cannot start the script thread: {error}"))
+                    .ok()
+            })
+            .as_ref()
+            .map(|fallback| fallback.handle.clone())
+            .ok_or_else(|| Failure::Spawn("cannot start the script thread".to_owned()))
+    }
+
+    /// The running process, started when there is none. `None` after a shutdown.
+    async fn ensure(&self) -> Result<Option<Arc<Proc>>, Failure> {
+        let _gate = self.inner.gate.lock().await;
+        if let Some(proc) = lock(&self.inner.current).clone()
+            && !lock(&proc.activity).dead
+        {
+            return Ok(Some(proc));
+        }
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let proc = self.spawn()?;
+        let mut current = lock(&self.inner.current);
+        if self.inner.closed.load(Ordering::SeqCst) {
+            proc.stop();
+            return Ok(None);
+        }
+        *current = Some(proc.clone());
+        Ok(Some(proc))
+    }
+
+    fn spawn(&self) -> Result<Arc<Proc>, Failure> {
+        let handle = self.handle()?;
+        // The pipes register with the runtime that is current while the process starts.
+        let _entered = handle.enter();
+        let spec = &self.inner.spec;
+        let mut child = spec.spawn().map_err(|error| {
+            Failure::Spawn(format!("cannot start {}: {error}", spec.command_name()))
+        })?;
+        let (Some(stdin), Some(stdout), Some(stderr)) =
+            (child.stdin.take(), child.stdout.take(), child.stderr.take())
+        else {
+            return Err(Failure::Spawn(format!("cannot talk to {}", spec.command_name())));
+        };
+        let (writer, lines) = unbounded_channel();
+        let (exit_tx, exit_rx) = watch::channel(None);
+        let stderr_last = Arc::new(Mutex::new(None));
+        let proc = Arc::new(Proc {
+            pending: Mutex::new(Some(HashMap::new())),
+            writer,
+            kill: CancellationToken::new(),
+            deliberate: AtomicBool::new(false),
+            activity: Mutex::new(Activity { dead: false, in_flight: 0, last: Instant::now() }),
+            exit: exit_rx,
+            stderr_last: stderr_last.clone(),
+            protocol_error: Mutex::new(None),
+        });
+        let eof = CancellationToken::new();
+        let log = spec.log_path();
+        let stderr = handle.spawn(async move {
+            pump_stderr_into(stderr, log, &stderr_last).await;
+        });
+        handle.spawn(write_loop(stdin, lines));
+        handle.spawn(read_loop(stdout, proc.clone(), eof.clone()));
+        handle.spawn(supervise(child, proc.clone(), eof, stderr, exit_tx));
+        Ok(proc)
+    }
+
+    /// Sends the request built by `make` and returns the call that waits for its answer. `None`
+    /// when `cancel` fired first or the session was shut down.
+    async fn open(
+        &self,
+        make: impl FnOnce(u64) -> Request,
+        cancel: &CancellationToken,
+    ) -> Result<Option<Call>, Failure> {
+        let deadline = Instant::now() + self.inner.timeout;
+        let attempt = async {
+            for _ in 0..ATTEMPTS {
+                let Some(proc) = self.ensure().await? else { return Ok(None) };
+                let id = self.next_id();
+                if let Some(rx) = proc.begin(id) {
+                    proc.send(&make(id));
+                    return Ok(Some(Call {
+                        session: self.clone(),
+                        proc,
+                        id,
+                        rx,
+                        deadline,
+                        cancel: cancel.clone(),
+                        finished: false,
+                    }));
+                }
+                // The process is going away; wait for its end, then start a new one.
+                proc.wait_exit().await;
+            }
+            Err(Failure::Exit { code: None, stderr: None })
+        };
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Ok(None),
+            () = sleep_until(deadline) => Err(Failure::Timeout(self.inner.timeout)),
+            outcome = attempt => outcome,
+        }
+    }
+
+    fn next_id(&self) -> u64 {
+        self.inner.next_id.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Like [`query`](Self::query), as batches for a provider: a failure becomes one error item
+    /// after the items that came before it.
+    pub fn query_batches(
+        &self,
+        command: &str,
+        text: &str,
+        preferences: BTreeMap<String, String>,
+        cancel: CancellationToken,
+    ) -> BoxStream<'static, ItemBatch> {
+        batches(self.inner.spec.extension(), self.query(command, text, preferences, cancel))
+    }
+
+    /// Sends one query to the process and streams what it answers until `done: true`. The process
+    /// starts first if it is not running. When `cancel` fires a `cancel` message goes to the
+    /// script and nothing more is yielded; a failure is the last event.
+    pub fn query(
+        &self,
+        command: &str,
+        text: &str,
+        preferences: BTreeMap<String, String>,
+        cancel: CancellationToken,
+    ) -> BoxStream<'static, Event> {
+        let start = QueryStart {
+            session: self.clone(),
+            command: command.to_owned(),
+            text: text.to_owned(),
+            preferences,
+            cancel,
+        };
+        stream::unfold(QueryState::Start(Box::new(start)), advance).boxed()
+    }
+
+    /// Sends a custom action to the process and waits for its `result`; the answer is the toast.
+    /// Cancelling ends the call without an answer.
+    pub async fn action(
+        &self,
+        command: &str,
+        item: &str,
+        action: &str,
+        cancel: CancellationToken,
+    ) -> Result<Option<String>, Failure> {
+        let make = |id| Request::Action {
+            id,
+            command: command.to_owned(),
+            item: item.to_owned(),
+            action: action.to_owned(),
+        };
+        let Some(mut call) = self.open(make, &cancel).await? else { return Ok(None) };
+        loop {
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    call.cancel();
+                    return Ok(None);
+                }
+                () = sleep_until(call.deadline) => return Err(call.time_out().await),
+                response = call.rx.recv() => match response {
+                    Some(Response::Result { toast, .. }) => {
+                        call.finished = true;
+                        return Ok(toast);
+                    }
+                    Some(Response::Items { .. }) => {}
+                    None => return Err(call.proc.failure().await),
+                },
+            }
+        }
+    }
+}
+
+/// One request in flight.
+struct Call {
+    session: Session,
+    proc: Arc<Proc>,
+    id: u64,
+    rx: UnboundedReceiver<Response>,
+    deadline: Instant,
+    cancel: CancellationToken,
+    /// The answer is complete: nothing to cancel.
+    finished: bool,
+}
+
+impl Call {
+    /// The request is superseded: tell the script to drop it.
+    fn cancel(&mut self) {
+        if !self.finished {
+            self.finished = true;
+            let id = self.session.next_id();
+            self.proc.send(&Request::Cancel { id, cancels: self.id });
+        }
+    }
+
+    /// The request ran out of time: the process is killed, the next request starts a new one.
+    async fn time_out(&mut self) -> Failure {
+        self.finished = true;
+        self.proc.stop();
+        let _ = timeout(STDERR_GRACE * 4, self.proc.wait_exit()).await;
+        Failure::Timeout(self.session.inner.timeout)
+    }
+}
+
+impl Drop for Call {
+    fn drop(&mut self) {
+        self.proc.end(self.id);
+    }
+}
+
+struct QueryStart {
+    session: Session,
+    command: String,
+    text: String,
+    preferences: BTreeMap<String, String>,
+    cancel: CancellationToken,
+}
+
+enum QueryState {
+    Start(Box<QueryStart>),
+    Running(Box<Call>),
+    Done,
+}
+
+async fn advance(state: QueryState) -> Option<(Event, QueryState)> {
+    match state {
+        QueryState::Done => None,
+        QueryState::Start(start) => begin(*start).await,
+        QueryState::Running(call) => pump(*call).await,
+    }
+}
+
+async fn begin(start: QueryStart) -> Option<(Event, QueryState)> {
+    start.session.bind_current();
+    let QueryStart { session, command, text, preferences, cancel } = start;
+    let make = |id| Request::Query { id, command, text, preferences };
+    match session.open(make, &cancel).await {
+        Ok(Some(call)) => pump(call).await,
+        Ok(None) => None,
+        Err(failure) => Some((Event::Failed(failure), QueryState::Done)),
+    }
+}
+
+async fn pump(mut call: Call) -> Option<(Event, QueryState)> {
+    loop {
+        tokio::select! {
+            biased;
+            () = call.cancel.cancelled() => {
+                call.cancel();
+                return None;
+            }
+            () = sleep_until(call.deadline) => {
+                let failure = call.time_out().await;
+                return Some((Event::Failed(failure), QueryState::Done));
+            }
+            response = call.rx.recv() => match response {
+                Some(Response::Items { items, done, .. }) => {
+                    let items: Vec<model::Item> = items.into_iter().map(Into::into).collect();
+                    if done {
+                        call.finished = true;
+                    }
+                    match (items.is_empty(), done) {
+                        (false, true) => return Some((Event::Items(items), QueryState::Done)),
+                        (false, false) => {
+                            return Some((Event::Items(items), QueryState::Running(Box::new(call))));
+                        }
+                        (true, true) => return None,
+                        (true, false) => {}
+                    }
+                }
+                Some(Response::Result { .. }) => {}
+                None => {
+                    let failure = call.proc.failure().await;
+                    return Some((Event::Failed(failure), QueryState::Done));
+                }
+            },
+        }
+    }
+}
