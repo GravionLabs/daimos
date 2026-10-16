@@ -176,8 +176,8 @@ it has not shown yet, for example while the window is busy. A request that gets 
 `sent answers faster than they were read`; the process keeps running for the other requests.
 Send fewer, larger `items` messages if you have many results.
 
-**Crashes.** A program that exits on its own, cannot be started, or writes a line that is not
-valid JSON or too long, has crashed. The open requests show `<name> failed` with the last line from standard error, and the
+**Crashes.** A program that exits on its own, cannot be started, stops reading its input while
+requests keep coming, or writes a line that is not valid JSON or too long, has crashed. The open requests show `<name> failed` with the last line from standard error, and the
 next request starts the program again after a short wait that doubles with every restart: 250 ms,
 then 500 ms, then 1 s. After three restarts within a minute, the next crash stops the extension:
 every query shows `<name> keeps crashing` with the last line from standard error, and nothing is

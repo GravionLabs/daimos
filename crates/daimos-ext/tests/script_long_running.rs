@@ -913,3 +913,48 @@ async fn a_backend_query_that_is_not_read_fails_instead_of_buffering() {
     assert!(last.items[0].subtitle.as_deref().unwrap().contains("faster than they were read"));
     assert!(rest.len() < 2000);
 }
+
+#[tokio::test]
+async fn a_script_that_stops_reading_its_input_is_killed_and_restarted() {
+    let python = python_or_skip!();
+    let ext = install(python, 10_000);
+    assert_eq!(titles(&ext.ask("a").await), ["echo a"]);
+    let pid = ext.pid();
+    let deaf = ext.session.query("search", "deaf", Default::default(), CancellationToken::new());
+    let deaf = tokio::spawn(deaf.collect::<Vec<_>>());
+    assert!(eventually(|| ext.read("deaf.log") == "deaf\n").await);
+
+    // Keystrokes: every query is replaced by the next one before it is answered. Big requests
+    // fill the pipe and then the queue quickly.
+    let text = "k".repeat(16 * 1024);
+    let mut failures = Vec::new();
+    for _ in 0..500 {
+        if !process_exists(&pid) {
+            break;
+        }
+        let cancel = CancellationToken::new();
+        let mut events = ext.session.query("search", &text, Default::default(), cancel.clone());
+        if let Ok(Some(Event::Failed(failure))) =
+            tokio::time::timeout(Duration::from_millis(20), events.next()).await
+        {
+            failures.push(failure);
+        }
+        cancel.cancel();
+    }
+    wait_until_gone(&pid).await;
+    // Whether the full queue was met by a request or by a cancel, the requests waiting learn why.
+    let deaf = deaf.await.unwrap();
+    let [Event::Failed(Failure::Interrupted(message))] = deaf.as_slice() else {
+        panic!("{deaf:?}")
+    };
+    assert_eq!(message, "stopped because it no longer read its input");
+    assert!(
+        failures.iter().all(|f| *f == Failure::Protocol("stopped reading its input".to_owned())),
+        "{failures:?}"
+    );
+
+    // It counted as a crash: the next request gets a new process after the backoff.
+    assert_eq!(titles(&ext.ask("back").await), ["echo back"]);
+    assert_eq!(ext.starts(), 2);
+    assert!(!ext.session.is_failed());
+}

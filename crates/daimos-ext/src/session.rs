@@ -16,8 +16,8 @@
 //!
 //! Memory stays bounded whatever the script does: a stdout line longer than [`MAX_LINE`] is a
 //! crash (the process is killed as soon as the line passes the limit, request or not), a request
-//! with more than 256 unread answers fails with [`Failure::Dropped`], and request lines
-//! for a script that does not read its input are capped too.
+//! with more than 256 unread answers fails with [`Failure::Dropped`], and a script that stops
+//! reading its input (its queue of request lines is full) is killed as a crash.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
@@ -311,6 +311,22 @@ impl Process {
         }
     }
 
+    /// The script stopped reading its input (its queue of request lines is full): kills it and
+    /// counts that as a crash, so the next request starts a fresh process after the backoff
+    /// instead of queueing behind this one.
+    fn wedged(&self) {
+        lock(&self.activity.crash).get_or_insert_with(|| (Instant::now(), stopped_reading()));
+        lock(&self.activity.reason).get_or_insert_with(|| {
+            Failure::Interrupted("stopped because it no longer read its input".to_owned())
+        });
+        self.kill.cancel();
+    }
+
+    /// Whether the process is on its way out: no request should join it.
+    fn is_ending(&self) -> bool {
+        (self.activity.is_stopping() || self.kill.is_cancelled()) && !self.exited.is_cancelled()
+    }
+
     /// Kills the child and waits until it is reaped; the requests still waiting fail with
     /// `reason`.
     async fn stop(&self, reason: Failure) {
@@ -318,6 +334,11 @@ impl Process {
         self.kill.cancel();
         self.exited.cancelled().await;
     }
+}
+
+/// The failure of a script whose input is full: it does not read its requests any more.
+fn stopped_reading() -> Failure {
+    Failure::Protocol("stopped reading its input".to_owned())
 }
 
 impl Drop for Process {
@@ -503,12 +524,11 @@ impl Session {
         loop {
             let stopping = {
                 let slot = lock(&self.inner.process);
-                slot.as_ref()
-                    .filter(|p| p.activity.is_stopping() && !p.exited.is_cancelled())
-                    .map(|p| p.exited.clone())
+                slot.as_ref().filter(|p| p.is_ending()).map(|p| p.exited.clone())
             };
             if let Some(exited) = stopping {
-                // An idle stop is under way: the new process starts once the old one is gone.
+                // An idle stop or a kill is under way: the new process starts once the old one is
+                // gone.
                 exited.cancelled().await;
                 continue;
             }
@@ -590,7 +610,8 @@ impl Session {
             if !call.process.send(&build(id)) {
                 let mut call = call;
                 call.finish();
-                return Err(Failure::Dropped("does not read its input".to_owned()));
+                call.process.wedged();
+                return Err(stopped_reading());
             }
             return Ok(Some(call));
         }
@@ -763,7 +784,10 @@ impl Call {
         }
         self.finish();
         let cancel = Request::Cancel { id: self.inner.next_id(), cancels: self.id };
-        self.process.send(&cancel);
+        // A cancel that cannot be queued is not dropped silently: the script is not reading.
+        if !self.process.send(&cancel) {
+            self.process.wedged();
+        }
     }
 }
 

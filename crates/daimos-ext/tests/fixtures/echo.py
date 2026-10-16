@@ -115,7 +115,8 @@ def serve(ignore_eof=False):
     `echo.py loop-stubborn` records `eof` in `eof.log` at the end of the input and then keeps
     running for a minute instead of exiting. More query texts: `huge` writes a line longer than
     the limit, `huge-later` answers and then writes such a line while no request waits, `flood`
-    sends 2000 batches at once before `done` and then records `done` in `flooded.log`.
+    sends 2000 batches at once before `done` and then records `done` in `flooded.log`, `deaf`
+    records `deaf` in `deaf.log` and stops reading its input while it keeps running.
 
     Records `start` in `starts.log`, `<id> <type>` per request in `requests.log` and
     `<id> <cancels>` per cancel in `cancels.log`. Query texts: `slow` answers after 0.5 s unless
@@ -189,6 +190,10 @@ def serve(ignore_eof=False):
             sys.exit(4)
         elif request.get("text") == "garbage":
             print("this is not json", flush=True)
+        elif request.get("text") == "deaf":
+            # Stops reading its input but stays alive.
+            record("deaf.log", "deaf")
+            time.sleep(60)
         else:
             threading.Thread(target=reply, args=(request,), daemon=True).start()
     if ignore_eof:

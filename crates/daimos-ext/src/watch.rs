@@ -125,28 +125,33 @@ impl ExtensionHost {
             return;
         }
         // The backend drops what it knew unless the same extension loads again: then `load`
-        // replaces it in one step, so no query finds the extension missing meanwhile.
+        // replaces it in one step, so no query finds the extension missing meanwhile. Only a load
+        // that goes ahead (no clash, nothing to confirm) skips the unload.
         let loaded = dir::load_extension(&path);
+        let clash = loaded.as_ref().ok().and_then(|extension| {
+            let name = &extension.manifest.extension.name;
+            self.registry.list().into_iter().find(|other| {
+                other.key != key
+                    && &other.name == name
+                    && other.state == crate::registry::ExtensionState::Enabled
+            })
+        });
         let old_name = self
             .registry
             .record(key)
             .filter(|record| record.state == crate::registry::ExtensionState::Enabled)
             .map(|record| record.name);
-        let replaced_in_place = loaded.as_ref().is_ok_and(|extension| {
-            extension.pending().is_none()
-                && old_name.as_deref() == Some(extension.manifest.extension.name.as_str())
-        });
+        let replaced_in_place = clash.is_none()
+            && loaded.as_ref().is_ok_and(|extension| {
+                extension.pending().is_none()
+                    && old_name.as_deref() == Some(extension.manifest.extension.name.as_str())
+            });
         if !replaced_in_place {
             self.unload(key);
         }
         match loaded {
             Ok(extension) => {
                 let manifest = &extension.manifest;
-                let clash = self.registry.list().into_iter().find(|other| {
-                    other.key != key
-                        && other.name == manifest.extension.name
-                        && other.state == crate::registry::ExtensionState::Enabled
-                });
                 if let Some(other) = clash {
                     let message = LoadError::Other {
                         file: path.join(MANIFEST_FILE),

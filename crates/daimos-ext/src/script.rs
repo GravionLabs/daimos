@@ -92,7 +92,7 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
                 if self.buf.is_empty() {
                     return Ok(Line::End);
                 }
-                return Ok(Line::Text(strip_cr(std::mem::take(&mut self.buf))));
+                return Ok(self.finish_line());
             }
             let newline = available.iter().position(|&b| b == b'\n');
             let chunk = newline.unwrap_or(available.len());
@@ -102,19 +102,32 @@ impl<R: AsyncRead + Unpin> LineReader<R> {
                 self.skipping = newline.is_none();
                 continue;
             }
-            if self.buf.len() + chunk > self.max {
-                let keep = self.max - self.buf.len();
+            // One byte more than `max` may wait: it can be the `\r` of a `\r\n` ending, which
+            // does not count. Whether the line is too long is decided once it ends.
+            if self.buf.len() + chunk > self.max + 1 {
+                let keep = (self.max + 1).saturating_sub(self.buf.len()).min(chunk);
                 self.buf.extend_from_slice(&available[..keep]);
                 self.reader.consume(used);
                 self.skipping = newline.is_none();
+                self.buf.truncate(self.max);
                 return Ok(Line::TooLong(std::mem::take(&mut self.buf)));
             }
             self.buf.extend_from_slice(&available[..chunk]);
             self.reader.consume(used);
             if newline.is_some() {
-                return Ok(Line::Text(strip_cr(std::mem::take(&mut self.buf))));
+                return Ok(self.finish_line());
             }
         }
+    }
+
+    /// The buffered line without its `\r`, or [`Line::TooLong`] when it is still over `max`.
+    fn finish_line(&mut self) -> Line {
+        let mut line = strip_cr(std::mem::take(&mut self.buf));
+        if line.len() > self.max {
+            line.truncate(self.max);
+            return Line::TooLong(line);
+        }
+        Line::Text(line)
     }
 }
 
@@ -1700,6 +1713,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_cr_of_a_crlf_ending_does_not_count_against_the_limit() {
+        assert_eq!(read_all(b"abcd\r\n", 4).await, [Line::Text(b"abcd".to_vec()), Line::End]);
+        assert_eq!(
+            read_all(b"abcde\r\nok\r\n", 4).await,
+            [Line::TooLong(b"abcd".to_vec()), Line::Text(b"ok".to_vec()), Line::End]
+        );
+        // One more byte without the CR is too long, LF or not.
+        assert_eq!(
+            read_all(b"abcde\nok", 4).await,
+            [Line::TooLong(b"abcd".to_vec()), Line::Text(b"ok".to_vec()), Line::End]
+        );
+    }
+
+    /// Hands out its input one byte per read, so lines span many reads.
+    struct Trickle(Vec<u8>, usize);
+
+    impl AsyncRead for Trickle {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+            buf: &mut tokio::io::ReadBuf<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            let at = self.1;
+            if let Some(&byte) = self.0.get(at) {
+                buf.put_slice(&[byte]);
+                self.1 += 1;
+            }
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn limits_hold_when_a_line_spans_many_reads() {
+        let lines = |input: &[u8]| {
+            let mut reader = LineReader::new(Trickle(input.to_vec(), 0), 4);
+            async move {
+                let mut out = Vec::new();
+                loop {
+                    let line = reader.next_line().await.unwrap();
+                    if line == Line::End {
+                        return out;
+                    }
+                    out.push(line);
+                }
+            }
+        };
+        assert_eq!(lines(b"abcd\r\n").await, [Line::Text(b"abcd".to_vec())]);
+        assert_eq!(lines(b"abcd\n").await, [Line::Text(b"abcd".to_vec())]);
+        assert_eq!(
+            lines(b"abcdefgh\nok\n").await,
+            [Line::TooLong(b"abcd".to_vec()), Line::Text(b"ok".to_vec())]
+        );
+    }
+
+    #[tokio::test]
     async fn a_line_that_never_ends_is_reported_as_soon_as_it_passes_the_limit() {
         let endless = vec![b'x'; 100_000];
         let mut reader = LineReader::new(endless.as_slice(), 10);
@@ -1797,6 +1865,33 @@ mod tests {
         host.reload("demo");
         assert!(backend.runner("demo").is_none());
         assert!(backend.runner("renamed").is_some());
+    }
+
+    #[test]
+    fn a_reload_that_ends_in_a_name_clash_still_unloads_the_old_runner() {
+        let root = tempfile::tempdir().unwrap();
+        let loaded = install(root.path(), "python3", true, "");
+        let backend = Arc::new(ScriptBackend::new());
+        let registry = Arc::new(crate::registry::Registry::new());
+        let host = crate::watch::ExtensionHost::new(
+            root.path().to_path_buf(),
+            backend.clone(),
+            Arc::clone(&registry),
+        );
+        host.reload_all();
+        assert!(backend.runner("demo").is_some());
+        // Another enabled extension now claims the same name.
+        registry.replace(
+            crate::registry::ExtensionRecord::enabled("other", &loaded.manifest),
+            Vec::new(),
+        );
+        host.reload("demo");
+        let record = registry.record("demo").unwrap();
+        let crate::registry::ExtensionState::Error(message) = record.state else {
+            panic!("{:?}", record.state)
+        };
+        assert!(message.contains("already used"), "{message}");
+        assert!(backend.runner("demo").is_none(), "the old runner and its process stayed");
     }
 
     #[tokio::test]
