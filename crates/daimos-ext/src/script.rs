@@ -98,6 +98,8 @@ pub struct OneShot {
     pub(crate) dir: PathBuf,
     pub(crate) command: Vec<String>,
     pub(crate) timeout: Duration,
+    /// Long-running only: how long the process may sit without a request.
+    pub(crate) idle_timeout: Duration,
     /// Where stderr is appended; `None` drops it.
     pub(crate) log: Option<PathBuf>,
 }
@@ -111,6 +113,7 @@ impl OneShot {
             dir,
             command: runtime.command.clone(),
             timeout: runtime.timeout(),
+            idle_timeout: runtime.idle_timeout(),
             log: None,
         }
     }
@@ -670,6 +673,7 @@ mod tests {
             dir: dir.to_path_buf(),
             command: vec![python.to_owned(), "main.py".to_owned()],
             timeout: Duration::from_millis(timeout_ms),
+            idle_timeout: Duration::from_secs(600),
             log: None,
         }
     }
@@ -815,6 +819,7 @@ mod tests {
             dir: dir.path().to_path_buf(),
             command: vec!["daimos-no-such-program".into()],
             timeout: Duration::from_secs(5),
+            idle_timeout: Duration::from_secs(600),
             log: None,
         };
         let events = collect(&shot, "").await;
@@ -894,6 +899,7 @@ mod tests {
             dir: PathBuf::from("ext"),
             command: vec!["bin/run".into()],
             timeout: Duration::from_secs(1),
+            idle_timeout: Duration::from_secs(600),
             log: None,
         };
         assert_eq!(shot.program(), Path::new("ext").join("bin/run"));
@@ -903,8 +909,12 @@ mod tests {
 
     #[test]
     fn the_runner_takes_its_timeout_from_the_manifest() {
-        let runtime =
-            ScriptRuntime { command: vec!["x".into()], long_running: false, timeout_ms: 1234 };
+        let runtime = ScriptRuntime {
+            command: vec!["x".into()],
+            long_running: false,
+            timeout_ms: 1234,
+            idle_timeout_ms: 600_000,
+        };
         let shot = OneShot::new("demo", PathBuf::from("."), &runtime);
         assert_eq!(shot.timeout(), Duration::from_millis(1234));
     }

@@ -8,7 +8,11 @@
 //! A process that ends on its own (exit, closed pipes, garbage on stdout) has crashed: the requests
 //! in flight fail and the next request starts a fresh process after a backoff. Too many crashes in
 //! a short time put the session in a failed state until a new session replaces it. A process the
-//! session stops itself (timeout kill, [`Session::shutdown`], drop) never counts.
+//! session stops itself (timeout kill, idle stop, [`Session::shutdown`], drop) never counts.
+//!
+//! A process that has had no request in flight for `idle_timeout` is stopped: stdin is closed so
+//! it can exit, and it is killed if it has not after a short grace. The next request starts a
+//! fresh one through the normal lazy start.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
@@ -35,6 +39,99 @@ const BACKOFF: Duration = Duration::from_millis(250);
 const MAX_RESTARTS: usize = 3;
 /// The rolling window the restarts are counted in.
 const WINDOW: Duration = Duration::from_secs(60);
+/// After stdin is closed for an idle stop, the process gets this long to exit before it is killed.
+const IDLE_GRACE: Duration = Duration::from_millis(500);
+/// Longest idle timeout honored; keeps the deadline arithmetic far from overflow.
+const MAX_IDLE: Duration = Duration::from_secs(365 * 24 * 3600);
+
+/// What the idle watcher needs to know about a process.
+struct Activity {
+    state: Mutex<ActivityState>,
+    /// Set (before `exited` fires) when the process ended without being asked to: when and why.
+    crash: Mutex<Option<(Instant, Failure)>>,
+}
+
+struct ActivityState {
+    /// Requests registered and not yet finished.
+    in_flight: usize,
+    /// The last time a request started or finished.
+    last: Instant,
+    /// The idle watcher decided to stop the process: no request may join it any more.
+    stopping: bool,
+}
+
+impl Activity {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(ActivityState {
+                in_flight: 0,
+                last: Instant::now(),
+                stopping: false,
+            }),
+            crash: Mutex::new(None),
+        }
+    }
+
+    /// Counts a request in; `false` when the process is being stopped.
+    fn enter(&self) -> bool {
+        let mut state = lock(&self.state);
+        if state.stopping {
+            return false;
+        }
+        state.in_flight += 1;
+        state.last = Instant::now();
+        true
+    }
+
+    fn leave(&self) {
+        let mut state = lock(&self.state);
+        state.in_flight = state.in_flight.saturating_sub(1);
+        state.last = Instant::now();
+    }
+
+    fn is_stopping(&self) -> bool {
+        lock(&self.state).stopping
+    }
+
+    /// Marks the process as stopping when it has been idle for `idle`; otherwise says when to look
+    /// again.
+    fn check(&self, idle: Duration) -> Option<Instant> {
+        let mut state = lock(&self.state);
+        if state.in_flight > 0 {
+            return Some(Instant::now() + idle);
+        }
+        let due = state.last + idle;
+        if Instant::now() >= due {
+            state.stopping = true;
+            None
+        } else {
+            Some(due)
+        }
+    }
+}
+
+/// Stops the process once it has been idle for `idle`: closes its stdin (`close`), and kills it
+/// if it has not exited after [`IDLE_GRACE`]. Returns when the process is gone.
+async fn watch_idle(
+    activity: Arc<Activity>,
+    idle: Duration,
+    close: CancellationToken,
+    kill: CancellationToken,
+    exited: CancellationToken,
+) {
+    let idle = idle.min(MAX_IDLE);
+    while let Some(look_again) = activity.check(idle) {
+        tokio::select! {
+            () = exited.cancelled() => return,
+            () = tokio::time::sleep_until(look_again) => {}
+        }
+    }
+    close.cancel();
+    tokio::select! {
+        () = exited.cancelled() => {}
+        () = tokio::time::sleep(IDLE_GRACE) => kill.cancel(),
+    }
+}
 
 /// The restart bookkeeping of a session: when the next start may happen and whether the process
 /// crashes too often to be started again.
@@ -88,8 +185,8 @@ struct Process {
     kill: CancellationToken,
     /// Fires once the child is reaped and every waiting request has been told.
     exited: CancellationToken,
-    /// Set (before `exited` fires) when the process ended without being asked to: when and why.
-    crash: Arc<Mutex<Option<(Instant, Failure)>>>,
+    /// Idle bookkeeping and the crash record.
+    activity: Arc<Activity>,
 }
 
 impl Process {
@@ -107,15 +204,18 @@ impl Process {
         let (lines, mut outgoing) = mpsc::unbounded_channel::<String>();
         let kill = CancellationToken::new();
         let exited = CancellationToken::new();
-        let crash = Arc::new(Mutex::new(None));
+        let activity = Arc::new(Activity::new());
+        let close = CancellationToken::new();
 
         // The writer is a task of its own, so a script that is busy writing never blocks on us.
         let stop = kill.clone();
+        let closed = close.clone();
         tokio::spawn(async move {
             loop {
                 let line = tokio::select! {
                     biased;
                     () = stop.cancelled() => break,
+                    () = closed.cancelled() => break,
                     line = outgoing.recv() => line,
                 };
                 let Some(line) = line else { break };
@@ -132,21 +232,35 @@ impl Process {
             Arc::clone(&waiting),
             kill.clone(),
             exited.clone(),
-            Arc::clone(&crash),
+            Arc::clone(&activity),
         ));
-        Ok(Arc::new(Self { lines, waiting, kill, exited, crash }))
+        tokio::spawn(watch_idle(
+            Arc::clone(&activity),
+            spec.idle_timeout,
+            close,
+            kill.clone(),
+            exited.clone(),
+        ));
+        Ok(Arc::new(Self { lines, waiting, kill, exited, activity }))
     }
 
     /// Registers request `id`; `None` when the process has already ended.
     fn register(&self, id: u64) -> Option<mpsc::UnboundedReceiver<Step>> {
         let (tx, rx) = mpsc::unbounded_channel();
-        lock(&self.waiting).as_mut()?.insert(id, tx);
+        let mut waiting = lock(&self.waiting);
+        let map = waiting.as_mut()?;
+        if !self.activity.enter() {
+            return None;
+        }
+        map.insert(id, tx);
         Some(rx)
     }
 
     fn deregister(&self, id: u64) {
-        if let Some(map) = lock(&self.waiting).as_mut() {
-            map.remove(&id);
+        if let Some(map) = lock(&self.waiting).as_mut()
+            && map.remove(&id).is_some()
+        {
+            self.activity.leave();
         }
     }
 
@@ -177,7 +291,7 @@ async fn supervise(
     waiting: Arc<Waiting>,
     kill: CancellationToken,
     exited: CancellationToken,
-    crash: Arc<Mutex<Option<(Instant, Failure)>>>,
+    activity: Arc<Activity>,
 ) {
     let mut deliberate = false;
     let mut failure = loop {
@@ -221,8 +335,8 @@ async fn supervise(
         *last =
             tokio::time::timeout(STDERR_GRACE, handle).await.ok().and_then(Result::ok).flatten();
     }
-    if !deliberate {
-        *lock(&crash) = Some((Instant::now(), failure.clone()));
+    if !deliberate && !activity.is_stopping() {
+        *lock(&activity.crash) = Some((Instant::now(), failure.clone()));
     }
     kill.cancel();
     let waiters = lock(&waiting).take().unwrap_or_default();
@@ -312,12 +426,23 @@ impl Session {
     /// counted first; the start waits for its backoff.
     async fn process(&self) -> Result<Arc<Process>, Failure> {
         loop {
+            let stopping = {
+                let slot = lock(&self.inner.process);
+                slot.as_ref()
+                    .filter(|p| p.activity.is_stopping() && !p.exited.is_cancelled())
+                    .map(|p| p.exited.clone())
+            };
+            if let Some(exited) = stopping {
+                // An idle stop is under way: the new process starts once the old one is gone.
+                exited.cancelled().await;
+                continue;
+            }
             let wait_until = {
                 let mut slot = lock(&self.inner.process);
                 let mut health = lock(&self.inner.health);
                 if slot.as_ref().is_some_and(|p| p.exited.is_cancelled())
                     && let Some(process) = slot.take()
-                    && let Some((at, failure)) = lock(&process.crash).take()
+                    && let Some((at, failure)) = lock(&process.activity.crash).take()
                 {
                     let stderr = match failure {
                         Failure::Exit { stderr, .. } => stderr,
@@ -589,5 +714,99 @@ mod tests {
         let (mut health, base) = health_after(&[0, 1, 2, 3]);
         health.crashed(base + Duration::from_secs(1000), Some("later".to_owned()));
         assert_eq!(health.failed, Some(Some("at 3".to_owned())));
+    }
+
+    struct Watch {
+        activity: Arc<Activity>,
+        close: CancellationToken,
+        kill: CancellationToken,
+        exited: CancellationToken,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    fn watch(idle: Duration) -> Watch {
+        let activity = Arc::new(Activity::new());
+        let (close, kill, exited) =
+            (CancellationToken::new(), CancellationToken::new(), CancellationToken::new());
+        let task = tokio::spawn(watch_idle(
+            Arc::clone(&activity),
+            idle,
+            close.clone(),
+            kill.clone(),
+            exited.clone(),
+        ));
+        Watch { activity, close, kill, exited, task }
+    }
+
+    const IDLE: Duration = Duration::from_secs(10);
+
+    #[tokio::test(start_paused = true)]
+    async fn stdin_is_closed_once_the_idle_time_has_passed() {
+        let w = watch(IDLE);
+        tokio::time::sleep(IDLE - Duration::from_millis(1)).await;
+        assert!(!w.close.is_cancelled());
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert!(w.close.is_cancelled());
+        assert!(w.activity.is_stopping());
+        assert!(!w.kill.is_cancelled(), "the process gets a grace period to exit");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_process_that_ignores_the_closed_stdin_is_killed_after_the_grace() {
+        let w = watch(IDLE);
+        tokio::time::sleep(IDLE + IDLE_GRACE - Duration::from_millis(1)).await;
+        assert!(!w.kill.is_cancelled());
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        assert!(w.kill.is_cancelled());
+        w.task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_process_that_exits_within_the_grace_is_not_killed() {
+        let w = watch(IDLE);
+        tokio::time::sleep(IDLE + Duration::from_millis(10)).await;
+        w.exited.cancel();
+        w.task.await.unwrap();
+        assert!(!w.kill.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_resets_the_idle_time() {
+        let w = watch(IDLE);
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        assert!(w.activity.enter());
+        w.activity.leave();
+        tokio::time::sleep(Duration::from_secs(8)).await;
+        assert!(!w.close.is_cancelled(), "16 s after the start, but only 8 s idle");
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        assert!(w.close.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_request_in_flight_keeps_the_process_however_long_it_takes() {
+        let w = watch(IDLE);
+        assert!(w.activity.enter());
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        assert!(!w.close.is_cancelled());
+        w.activity.leave();
+        tokio::time::sleep(IDLE - Duration::from_secs(1)).await;
+        assert!(!w.close.is_cancelled(), "the idle time counts from the end of the request");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert!(w.close.is_cancelled());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn no_request_joins_a_process_that_is_being_stopped() {
+        let w = watch(IDLE);
+        tokio::time::sleep(IDLE + Duration::from_millis(10)).await;
+        assert!(!w.activity.enter());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_process_that_ends_earlier_ends_the_watcher() {
+        let w = watch(IDLE);
+        w.exited.cancel();
+        w.task.await.unwrap();
+        assert!(!w.close.is_cancelled());
     }
 }

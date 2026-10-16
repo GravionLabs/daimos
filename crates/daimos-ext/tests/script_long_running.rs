@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use daimos_ext::manifest::DEFAULT_IDLE_TIMEOUT_MS;
 use daimos_ext::script::Event;
 use daimos_ext::{Failure, ScriptRuntime, Session};
 use futures::StreamExt;
@@ -69,6 +70,10 @@ impl Fixture {
 }
 
 fn install(python: &str, timeout_ms: u64) -> Fixture {
+    install_idle(python, timeout_ms, DEFAULT_IDLE_TIMEOUT_MS)
+}
+
+fn install_idle(python: &str, timeout_ms: u64, idle_timeout_ms: u64) -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/echo.py");
     std::fs::copy(fixture, root.path().join("echo.py")).unwrap();
@@ -76,6 +81,7 @@ fn install(python: &str, timeout_ms: u64) -> Fixture {
         command: vec![python.to_owned(), "echo.py".to_owned(), "loop".to_owned()],
         long_running: true,
         timeout_ms,
+        idle_timeout_ms,
     };
     let session = Session::new("echo", root.path().to_path_buf(), &runtime);
     Fixture { root, session }
@@ -289,6 +295,7 @@ async fn a_program_that_does_not_exist_is_a_spawn_failure() {
         command: vec!["daimos-no-such-program".to_owned()],
         long_running: true,
         timeout_ms: 5000,
+        idle_timeout_ms: DEFAULT_IDLE_TIMEOUT_MS,
     };
     let session = Session::new("echo", PathBuf::from(dir.path()), &runtime);
     let events: Vec<_> =
@@ -363,6 +370,7 @@ async fn a_new_session_after_a_reload_is_not_failed() {
             command: vec![python.to_owned(), "echo.py".to_owned(), "loop".to_owned()],
             long_running: true,
             timeout_ms: 10_000,
+            idle_timeout_ms: DEFAULT_IDLE_TIMEOUT_MS,
         },
     );
     let events: Vec<_> = reloaded
@@ -385,4 +393,73 @@ async fn deliberate_stops_do_not_count_as_crashes() {
     }
     assert!(!ext.session.is_failed());
     assert_eq!(titles(&ext.ask("still fine").await), ["echo still fine"]);
+}
+
+/// A real, short idle time: the session stops the process on its own and starts it again.
+const IDLE_MS: u64 = 600;
+
+async fn wait_until_gone(pid: &str) {
+    let started = Instant::now();
+    while process_exists(pid) {
+        assert!(started.elapsed() < Duration::from_secs(10), "process {pid} still runs");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn an_idle_process_is_stopped_and_the_next_query_starts_it_again() {
+    let python = python_or_skip!();
+    let ext = install_idle(python, 10_000, IDLE_MS);
+    assert_eq!(titles(&ext.ask("a").await), ["echo a"]);
+    let pid = ext.pid();
+    assert!(ext.session.is_running());
+
+    wait_until_gone(&pid).await;
+    assert!(!ext.session.is_running());
+    assert_eq!(ext.starts(), 1);
+
+    assert_eq!(titles(&ext.ask("b").await), ["echo b"]);
+    assert_eq!(ext.starts(), 2, "the second query starts a new process");
+    assert_ne!(ext.pid(), pid);
+}
+
+#[tokio::test]
+async fn an_idle_stop_is_not_a_crash() {
+    let python = python_or_skip!();
+    let ext = install_idle(python, 10_000, 300);
+    for _ in 0..5 {
+        assert_eq!(titles(&ext.ask("again").await), ["echo again"]);
+        wait_until_gone(&ext.pid()).await;
+    }
+    assert!(!ext.session.is_failed());
+    // No backoff either: the sixth start is not delayed.
+    let started = Instant::now();
+    assert_eq!(titles(&ext.ask("last").await), ["echo last"]);
+    assert!(started.elapsed() < Duration::from_millis(200), "{:?}", started.elapsed());
+    assert_eq!(ext.starts(), 6);
+}
+
+#[tokio::test]
+async fn a_query_resets_the_idle_time() {
+    let python = python_or_skip!();
+    let ext = install_idle(python, 10_000, 1500);
+    ext.ask("a").await;
+    let pid = ext.pid();
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        assert_eq!(titles(&ext.ask("again").await), ["echo again"]);
+    }
+    // 2.4 s since the start, more than the idle time, but never idle for 1.5 s.
+    assert!(process_exists(&pid));
+    assert_eq!(ext.starts(), 1);
+    wait_until_gone(&pid).await;
+}
+
+#[tokio::test]
+async fn a_slow_request_keeps_the_process_beyond_the_idle_time() {
+    let python = python_or_skip!();
+    let ext = install_idle(python, 10_000, 200);
+    // `slow` answers after 0.5 s: longer than the idle time, still one process.
+    assert_eq!(titles(&ext.ask("slow").await), ["slow done"]);
+    assert_eq!(ext.starts(), 1);
 }
