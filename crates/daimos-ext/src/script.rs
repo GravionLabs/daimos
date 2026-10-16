@@ -1,9 +1,10 @@
-//! Running script extensions in one-shot mode: one process per query.
+//! Running script extensions: one-shot mode (one process per request) here, long-running mode
+//! through [`Session`]; [`ScriptBackend`] runs both.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 use std::time::Duration;
 
 use daimos_core::model::{self, ItemBatch};
@@ -12,6 +13,7 @@ use futures::StreamExt;
 use futures::stream::{self, BoxStream};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdout, Command};
+use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -21,6 +23,7 @@ use crate::manifest::{Manifest, Runtime, ScriptRuntime};
 use crate::preferences::Preferences;
 use crate::protocol::{self, Request, Response};
 use crate::provider::Backend;
+use crate::session::Session;
 
 /// `CREATE_NO_WINDOW`: no console window flashes when the script starts on Windows.
 #[cfg(windows)]
@@ -136,10 +139,7 @@ impl OneShot {
     ) -> BoxStream<'static, ItemBatch> {
         let extension = self.extension.clone();
         self.query(command, text, preferences, cancel)
-            .map(move |event| match event {
-                Event::Items(items) => ItemBatch::from(items),
-                Event::Failed(failure) => ItemBatch::from(vec![failure_item(&extension, &failure)]),
-            })
+            .map(move |event| event_batch(&extension, event))
             .boxed()
     }
 
@@ -325,18 +325,188 @@ async fn start(pending: Pending) -> Option<(Step, State)> {
     step(run).await
 }
 
-/// Runs the one-shot script extensions (`runtime = "script"`, `long_running = false`). Queries of
-/// other extensions (wasm, long-running scripts) get no answer until their hosts exist.
+/// How long stopping long-running processes (unload, reload, drop of the backend) may take before
+/// the caller goes on; the processes are killed either way.
+const STOP_WAIT: Duration = Duration::from_secs(2);
+
+/// How a loaded script extension runs.
+#[derive(Clone)]
+enum Runner {
+    /// `long_running = false`: one process per request.
+    OneShot(OneShot),
+    /// `long_running = true`: one process for all requests, driven on the session thread.
+    Session { session: Session, handle: Handle },
+}
+
+impl Runner {
+    /// One-shot queries wait for the debounce; a long-running process costs nothing to ask.
+    fn debounce(&self) -> Option<Duration> {
+        match self {
+            Self::OneShot(_) => Some(DEBOUNCE),
+            Self::Session { .. } => None,
+        }
+    }
+
+    fn batches(
+        &self,
+        extension: &str,
+        command: &str,
+        text: &str,
+        preferences: BTreeMap<String, String>,
+        cancel: CancellationToken,
+    ) -> BoxStream<'static, ItemBatch> {
+        match self {
+            Self::OneShot(runner) => runner.query_batches(command, text, preferences, cancel),
+            Self::Session { session, handle } => {
+                let extension = extension.to_owned();
+                on_runtime(handle, session.query(command, text, preferences, cancel))
+                    .map(move |event| event_batch(&extension, event))
+                    .boxed()
+            }
+        }
+    }
+
+    /// Runs a custom action; blocks the calling thread until it is answered.
+    fn action(
+        &self,
+        extension: &str,
+        command: &str,
+        item: &str,
+        action: &str,
+    ) -> Result<Option<String>, String> {
+        let (command, item, action) = (command.to_owned(), item.to_owned(), action.to_owned());
+        let outcome = match self {
+            Self::OneShot(runner) => {
+                let runner = runner.clone();
+                // A thread of its own with its own runtime: this call blocks, and may be made from
+                // a thread that has no runtime or from one that must not block one.
+                std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| Failure::Spawn(error.to_string()))?;
+                    runtime.block_on(runner.action(
+                        &command,
+                        &item,
+                        &action,
+                        CancellationToken::new(),
+                    ))
+                })
+                .join()
+                .ok()
+            }
+            Self::Session { session, handle } => {
+                // The session lives on its own thread, so this works from any thread and runtime.
+                let session = session.clone();
+                let (tx, rx) = std::sync::mpsc::channel();
+                handle.spawn(async move {
+                    let outcome =
+                        session.action(&command, &item, &action, CancellationToken::new()).await;
+                    let _ = tx.send(outcome);
+                });
+                rx.recv().ok()
+            }
+        };
+        match outcome {
+            Some(Ok(toast)) => Ok(toast),
+            Some(Err(failure)) => Err(format!("{extension}: {}", failure.message())),
+            None => Err(format!("{extension} stopped unexpectedly")),
+        }
+    }
+}
+
+/// What the user sees of one event of a query.
+fn event_batch(extension: &str, event: Event) -> ItemBatch {
+    match event {
+        Event::Items(items) => ItemBatch::from(items),
+        Event::Failed(failure) => ItemBatch::from(vec![failure_item(extension, &failure)]),
+    }
+}
+
+/// Polls `events` on the runtime of `handle` and streams them to whoever polls the result.
+/// Dropping the result drops `events` there too.
+fn on_runtime<T: Send + 'static>(
+    handle: &Handle,
+    mut events: BoxStream<'static, T>,
+) -> BoxStream<'static, T> {
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    handle.spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                () = tx.closed() => break,
+                event = events.next() => {
+                    let Some(event) = event else { break };
+                    if tx.send(event).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|event| (event, rx)) }).boxed()
+}
+
+/// The thread the processes of long-running scripts live on, with a runtime of its own: a session
+/// outlives whichever runtime or thread a query or an action came from.
+struct SessionThread {
+    handle: Handle,
+    stop: CancellationToken,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl SessionThread {
+    fn start() -> std::io::Result<Self> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+        let handle = runtime.handle().clone();
+        let stop = CancellationToken::new();
+        let stopped = stop.clone();
+        let thread = std::thread::Builder::new()
+            .name("daimos-script-sessions".to_owned())
+            // Dropping the runtime at the end drops what still runs; children die with it.
+            .spawn(move || runtime.block_on(stopped.cancelled()))?;
+        Ok(Self { handle, stop, thread: Some(thread) })
+    }
+
+    /// Kills the processes of `sessions` and waits (at most [`STOP_WAIT`]) until they are reaped.
+    fn stop_sessions(&self, sessions: Vec<Session>) {
+        if sessions.is_empty() {
+            return;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.handle.spawn(async move {
+            let all = futures::future::join_all(sessions.iter().map(Session::shutdown));
+            let _ = tokio::time::timeout(STOP_WAIT, all).await;
+            let _ = tx.send(());
+        });
+        let _ = rx.recv_timeout(STOP_WAIT + Duration::from_millis(500));
+    }
+}
+
+impl Drop for SessionThread {
+    fn drop(&mut self) {
+        self.stop.cancel();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Runs the script extensions (`runtime = "script"`): one-shot ones with a process per request,
+/// long-running ones through a [`Session`] each. Queries of other extensions (wasm) get no answer
+/// until their host exists.
 #[derive(Default)]
 pub struct ScriptBackend {
     /// By extension name.
-    runners: RwLock<BTreeMap<String, OneShot>>,
+    runners: RwLock<BTreeMap<String, Runner>>,
     /// Where `logs/<extension>.log` goes; no logging without it.
     data_dir: Option<PathBuf>,
     /// The manifests of the loaded extensions, for their preferences.
     manifests: RwLock<BTreeMap<String, Manifest>>,
     /// Where the preference values come from; queries carry none without it.
     preferences: Option<Arc<Preferences>>,
+    /// Started with the first long-running extension; `None` inside when it could not start.
+    sessions: OnceLock<Option<SessionThread>>,
 }
 
 impl ScriptBackend {
@@ -346,7 +516,14 @@ impl ScriptBackend {
 
     /// A backend that writes the stderr of scripts to `<data_dir>/logs/<extension>.log`.
     pub fn with_data_dir(data_dir: PathBuf) -> Self {
-        Self { data_dir: Some(data_dir), ..Self::default() }
+        // Spelled out: a type with `Drop` cannot be built with `..Self::default()`.
+        Self {
+            runners: RwLock::default(),
+            data_dir: Some(data_dir),
+            manifests: RwLock::default(),
+            preferences: None,
+            sessions: OnceLock::new(),
+        }
     }
 
     /// Fills the `preferences` of every query from `preferences`, passwords read from the keyring
@@ -357,8 +534,46 @@ impl ScriptBackend {
         self
     }
 
-    fn runner(&self, extension: &str) -> Option<OneShot> {
+    fn runner(&self, extension: &str) -> Option<Runner> {
         self.runners.read().unwrap_or_else(|e| e.into_inner()).get(extension).cloned()
+    }
+
+    fn session_thread(&self) -> Option<&SessionThread> {
+        self.sessions
+            .get_or_init(|| {
+                SessionThread::start()
+                    .map_err(|error| log::error!("cannot start the script session thread: {error}"))
+                    .ok()
+            })
+            .as_ref()
+    }
+
+    /// Removes the runner of `name`; a long-running process is killed and its state (crash count,
+    /// failed state) goes with it.
+    fn remove_runner(&self, name: &str) {
+        let removed = self.runners.write().unwrap_or_else(|e| e.into_inner()).remove(name);
+        if let (Some(Runner::Session { session, .. }), Some(Some(thread))) =
+            (removed, self.sessions.get())
+        {
+            thread.stop_sessions(vec![session]);
+        }
+    }
+}
+
+impl Drop for ScriptBackend {
+    /// Kills every long-running process before the session thread ends.
+    fn drop(&mut self) {
+        let runners = std::mem::take(self.runners.get_mut().unwrap_or_else(|e| e.into_inner()));
+        let sessions = runners
+            .into_values()
+            .filter_map(|runner| match runner {
+                Runner::Session { session, .. } => Some(session),
+                Runner::OneShot(_) => None,
+            })
+            .collect();
+        if let Some(Some(thread)) = self.sessions.get() {
+            thread.stop_sessions(sessions);
+        }
     }
 }
 
@@ -381,11 +596,13 @@ impl Backend for ScriptBackend {
         // A newer keystroke cancels this query during the delay, so no process starts for it.
         let wait = {
             let cancel = cancel.clone();
+            let debounce = runner.debounce();
             async move {
+                let Some(debounce) = debounce else { return true };
                 tokio::select! {
                     biased;
                     () = cancel.cancelled() => false,
-                    () = tokio::time::sleep(DEBOUNCE) => true,
+                    () = tokio::time::sleep(debounce) => true,
                 }
             }
         };
@@ -412,7 +629,7 @@ impl Backend for ScriptBackend {
                 }
                 _ => BTreeMap::new(),
             };
-            runner.query_batches(&command, &text, preferences, cancel)
+            runner.batches(&extension, &command, &text, preferences, cancel)
         })
         .flatten()
         .boxed()
@@ -426,22 +643,11 @@ impl Backend for ScriptBackend {
         action: &str,
     ) -> Result<Option<String>, String> {
         let runner = self.runner(extension).ok_or_else(|| format!("{extension} is not loaded"))?;
-        let (command, item, action) = (command.to_owned(), item.to_owned(), action.to_owned());
-        // A thread of its own with its own runtime: this call blocks, and may be made from a
-        // thread that has no runtime or from one that must not block one.
-        let outcome = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .map_err(|error| error.to_string())?;
-            runtime
-                .block_on(runner.action(&command, &item, &action, CancellationToken::new()))
-                .map_err(|failure| format!("{}: {}", runner.extension, failure.message()))
-        })
-        .join();
-        outcome.unwrap_or_else(|_| Err(format!("{extension} stopped unexpectedly")))
+        runner.action(extension, command, item, action)
     }
 
+    /// Loads (or reloads) an extension; a long-running process of the previous load is stopped
+    /// first, so the next request starts the new one with a clean crash count.
     fn load(&self, extension: &LoadedExtension) {
         let manifest = &extension.manifest;
         let name = &manifest.extension.name;
@@ -449,21 +655,33 @@ impl Backend for ScriptBackend {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(name.clone(), manifest.clone());
-        let mut runners = self.runners.write().unwrap_or_else(|e| e.into_inner());
-        runners.remove(name);
+        self.remove_runner(name);
         let script = match (&manifest.runtime.script, manifest.extension.runtime) {
-            (Some(script), Runtime::Script) if !script.long_running => script,
+            (Some(script), Runtime::Script) => script,
             _ => return,
         };
-        let mut runner = OneShot::new(name, extension.dir.clone(), script);
-        if let Some(data_dir) = &self.data_dir {
-            runner = runner.with_log(dir::log_path_in(data_dir, name));
-        }
-        runners.insert(name.clone(), runner);
+        let log = self.data_dir.as_ref().map(|data_dir| dir::log_path_in(data_dir, name));
+        let runner = if script.long_running {
+            let Some(thread) = self.session_thread() else { return };
+            let mut session = Session::new(name, extension.dir.clone(), script);
+            if let Some(log) = log {
+                session = session.with_log(log);
+            }
+            Runner::Session { session, handle: thread.handle.clone() }
+        } else {
+            let mut runner = OneShot::new(name, extension.dir.clone(), script);
+            if let Some(log) = log {
+                runner = runner.with_log(log);
+            }
+            Runner::OneShot(runner)
+        };
+        self.runners.write().unwrap_or_else(|e| e.into_inner()).insert(name.clone(), runner);
     }
 
+    /// Forgets an extension; its long-running process is killed before this returns (or after
+    /// [`STOP_WAIT`] at the latest).
     fn unload(&self, name: &str) {
-        self.runners.write().unwrap_or_else(|e| e.into_inner()).remove(name);
+        self.remove_runner(name);
         self.manifests.write().unwrap_or_else(|e| e.into_inner()).remove(name);
     }
 }
@@ -1195,15 +1413,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn long_running_unknown_and_unloaded_extensions_are_unaffected() {
+    async fn unknown_and_unloaded_extensions_answer_nothing() {
         let python = python_or_skip!();
         let root = tempfile::tempdir().unwrap();
         let backend = ScriptBackend::new();
         let cancel = CancellationToken::new();
         // Never loaded.
-        assert!(query_of(&backend, "x", &cancel).collect::<Vec<_>>().await.is_empty());
-        // Long-running: stays a stub until its own host exists.
-        backend.load(&install(root.path(), python, true, &counting_script()));
         assert!(query_of(&backend, "x", &cancel).collect::<Vec<_>>().await.is_empty());
         // One-shot, then unloaded again.
         backend.load(&install(root.path(), python, false, &counting_script()));
@@ -1213,15 +1428,78 @@ mod tests {
         assert_eq!(runs(root.path()), 1);
     }
 
+    /// Serves queries until stdin closes, counting starts in `runs` and requests in `requests`.
+    fn long_running_script() -> String {
+        "import json, sys\n\
+         open('runs', 'a').write('x\\n')\n\
+         for line in sys.stdin:\n    request = json.loads(line)\n\
+         \x20   open('requests', 'a').write(request['type'] + '\\n')\n\
+         \x20   if request['type'] == 'query':\n\
+         \x20       print(json.dumps({'id': request['id'], 'type': 'items', 'done': True, \
+         'items': [{'id': 't', 'title': request['text']}]}), flush=True)\n"
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn a_long_running_extension_answers_queries_from_one_process() {
+        let python = python_or_skip!();
+        let root = tempfile::tempdir().unwrap();
+        let backend = ScriptBackend::new();
+        backend.load(&install(root.path(), python, true, &long_running_script()));
+        let cancel = CancellationToken::new();
+        for text in ["a", "b"] {
+            let batches: Vec<_> = query_of(&backend, text, &cancel).collect().await;
+            let [batch] = batches.as_slice() else { panic!("{batches:?}") };
+            assert_eq!(batch.items[0].title, text);
+        }
+        assert_eq!(runs(root.path()), 1, "both queries went to the same process");
+    }
+
+    #[tokio::test]
+    async fn a_long_running_query_is_sent_without_the_debounce() {
+        let python = python_or_skip!();
+        let root = tempfile::tempdir().unwrap();
+        let backend = ScriptBackend::new();
+        backend.load(&install(root.path(), python, true, &long_running_script()));
+        let cancel = CancellationToken::new();
+        let _: Vec<_> = query_of(&backend, "warm", &cancel).collect().await;
+
+        // Polled once and then left alone: a debounced query would never get past its delay.
+        // (Under load the answer may already be there on that one poll; that is fine too.)
+        let mut stream = query_of(&backend, "now", &cancel);
+        let _ = futures::FutureExt::now_or_never(stream.next());
+        let requests = root.path().join("demo").join("requests");
+        let started = StdInstant::now();
+        while std::fs::read_to_string(&requests).unwrap_or_default().lines().count() < 2 {
+            assert!(started.elapsed() < Duration::from_secs(10), "the query never reached it");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        drop(stream);
+    }
+
+    fn runner_debounce(backend: &ScriptBackend) -> Option<Duration> {
+        backend.runner("demo").unwrap().debounce()
+    }
+
+    #[test]
+    fn only_one_shot_queries_are_debounced() {
+        let root = tempfile::tempdir().unwrap();
+        let backend = ScriptBackend::new();
+        backend.load(&install(root.path(), "python3", false, ""));
+        assert_eq!(runner_debounce(&backend), Some(DEBOUNCE));
+        backend.load(&install(root.path(), "python3", true, ""));
+        assert_eq!(runner_debounce(&backend), None);
+    }
+
     #[test]
     fn the_stderr_log_goes_below_the_data_dir() {
         let backend = ScriptBackend::with_data_dir(PathBuf::from("data"));
         let root = tempfile::tempdir().unwrap();
         // The manifest need not run for this: only the loaded runner is looked at.
         backend.load(&install(root.path(), "python3", false, ""));
-        let log = backend.runner("demo").unwrap().log;
-        assert_eq!(log, Some(Path::new("data").join("logs").join("demo.log")));
-        assert_eq!(ScriptBackend::new().runner("demo").map(|r| r.log), None);
+        let Some(Runner::OneShot(runner)) = backend.runner("demo") else { panic!("not one-shot") };
+        assert_eq!(runner.log, Some(Path::new("data").join("logs").join("demo.log")));
+        assert!(ScriptBackend::new().runner("demo").is_none());
     }
 
     /// A script that answers a query with one item and an action with a toast.

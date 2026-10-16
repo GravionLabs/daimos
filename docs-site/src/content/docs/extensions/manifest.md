@@ -157,8 +157,9 @@ Each command is a source of results with the id `<extension name>.<command name>
 - Every result from an extension carries the extension's `title` as a label, so you can see where
   it came from.
 
-One-shot script extensions answer queries, see [script extensions](../scripts/). Wasm extensions
-and long-running scripts are still in development, so their commands return no results yet.
+Script extensions answer queries in one-shot and in long-running mode, see
+[script extensions](../scripts/). Wasm extensions are still in development, so their commands
+return no results yet.
 
 ## Validation
 

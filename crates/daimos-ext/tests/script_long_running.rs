@@ -1,15 +1,23 @@
 //! The long-running script protocol end to end: `fixtures/echo.py loop` is driven through a
-//! `Session`. The tests skip when there is no Python.
+//! `Session`, and through the `ScriptBackend` of an extension host and the query engine. The tests
+//! skip when there is no Python.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use daimos_core::QueryEngine;
+use daimos_core::provider::{Provider, QueryContext};
+use daimos_core::query::Sink;
 use daimos_ext::manifest::DEFAULT_IDLE_TIMEOUT_MS;
 use daimos_ext::script::Event;
-use daimos_ext::{Failure, ScriptRuntime, Session};
+use daimos_ext::{
+    Backend, ExtensionHost, Failure, Registry, ScriptBackend, ScriptRuntime, Session,
+};
 use futures::StreamExt;
+use tokio::runtime::Handle;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 fn python() -> Option<&'static str> {
@@ -461,5 +469,212 @@ async fn a_slow_request_keeps_the_process_beyond_the_idle_time() {
     let ext = install_idle(python, 10_000, 200);
     // `slow` answers after 0.5 s: longer than the idle time, still one process.
     assert_eq!(titles(&ext.ask("slow").await), ["slow done"]);
+    assert_eq!(ext.starts(), 1);
+}
+
+// Through the extension host, the `ScriptBackend` and the query engine.
+
+/// `fixtures/echo.py loop` installed as the extension `echo` with keyword `e`, loaded by a host
+/// over a real `ScriptBackend`.
+struct Hosted {
+    root: tempfile::TempDir,
+    backend: Arc<ScriptBackend>,
+    registry: Arc<Registry>,
+    host: ExtensionHost,
+}
+
+fn hosted_manifest(python: &str, keyword: &str) -> String {
+    format!(
+        "[extension]\nname = \"echo\"\ntitle = \"Echo\"\nversion = \"1.0.0\"\n\
+         runtime = \"script\"\n\n[[commands]]\nname = \"search\"\ntitle = \"Search\"\n\
+         keywords = [\"{keyword}\"]\n\n[runtime.script]\n\
+         command = [{python:?}, \"echo.py\", \"loop\"]\nlong_running = true\n"
+    )
+}
+
+fn host(python: &str) -> Hosted {
+    let root = tempfile::tempdir().unwrap();
+    let dir = root.path().join("echo");
+    std::fs::create_dir_all(&dir).unwrap();
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/echo.py");
+    std::fs::copy(fixture, dir.join("echo.py")).unwrap();
+    std::fs::write(dir.join("extension.toml"), hosted_manifest(python, "e")).unwrap();
+    daimos_ext::consent::confirm(&dir).unwrap();
+    let backend = Arc::new(ScriptBackend::new());
+    let registry = Arc::new(Registry::new());
+    let as_backend: Arc<dyn Backend> = backend.clone();
+    let host = ExtensionHost::new(root.path().to_path_buf(), as_backend, Arc::clone(&registry));
+    host.reload_all();
+    Hosted { root, backend, registry, host }
+}
+
+impl Hosted {
+    fn read(&self, name: &str) -> String {
+        std::fs::read_to_string(self.root.path().join("echo").join(name)).unwrap_or_default()
+    }
+
+    fn starts(&self) -> usize {
+        self.read("starts.log").lines().count()
+    }
+
+    fn pid(&self) -> String {
+        self.read("pid.txt")
+    }
+
+    /// The titles one query of the `search` command answers.
+    async fn ask(&self, text: &str) -> Vec<String> {
+        let providers = self.registry.providers();
+        let [provider] = providers.as_slice() else { panic!("{} providers", providers.len()) };
+        let ctx = QueryContext {
+            text: text.into(),
+            keyword_routed: true,
+            cancel: CancellationToken::new(),
+        };
+        let batches: Vec<_> = provider.query(ctx).collect().await;
+        batches.into_iter().flat_map(|b| b.items).map(|item| item.title).collect()
+    }
+
+    fn star(&self, item: &str) -> Result<Option<String>, String> {
+        self.backend.custom_action("echo", "search", item, "star")
+    }
+}
+
+#[tokio::test]
+async fn a_long_running_extension_serves_queries_and_custom_actions_from_one_process() {
+    let python = python_or_skip!();
+    let ext = host(python);
+    assert_eq!(ext.ask("a").await, ["echo a"]);
+    let pid = ext.pid();
+    // A custom action blocks this (runtime) thread; the session runs elsewhere, so no deadlock.
+    assert_eq!(ext.star("echo a"), Ok(Some("Starred echo a".to_owned())));
+    assert_eq!(ext.ask("pid").await, [pid]);
+    assert_eq!(ext.starts(), 1);
+    let types: Vec<_> = ext
+        .read("requests.log")
+        .lines()
+        .map(|line| line.split(' ').nth(1).unwrap().to_owned())
+        .collect();
+    assert_eq!(types, ["query", "action", "query"]);
+}
+
+#[test]
+fn a_session_outlives_the_runtime_that_started_it() {
+    let python = python_or_skip!();
+    let ext = host(python);
+    let runtime = || tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    // The first query starts the process from a runtime that is gone afterwards.
+    assert_eq!(runtime().block_on(ext.ask("a")), ["echo a"]);
+    let pid = ext.pid();
+    // An action from a thread without any runtime reaches the same process.
+    let backend = Arc::clone(&ext.backend);
+    let toast = std::thread::spawn(move || backend.custom_action("echo", "search", "i", "star"))
+        .join()
+        .unwrap();
+    assert_eq!(toast, Ok(Some("Starred i".to_owned())));
+    assert_eq!(runtime().block_on(ext.ask("pid")), [pid]);
+    assert_eq!(ext.starts(), 1);
+}
+
+#[tokio::test]
+async fn unload_kills_the_process_before_it_returns() {
+    let python = python_or_skip!();
+    let ext = host(python);
+    assert_eq!(ext.ask("a").await, ["echo a"]);
+    let pid = ext.pid();
+    assert!(process_exists(&pid));
+    ext.backend.unload("echo");
+    assert!(!process_exists(&pid), "process {pid} is still there (or a zombie)");
+    assert_eq!(ext.star("i"), Err("echo is not loaded".to_owned()));
+}
+
+#[tokio::test]
+async fn removing_the_extension_kills_its_process() {
+    let python = python_or_skip!();
+    let ext = host(python);
+    assert_eq!(ext.ask("a").await, ["echo a"]);
+    let pid = ext.pid();
+    std::fs::remove_file(ext.root.path().join("echo").join("extension.toml")).unwrap();
+    ext.host.reload_all();
+    assert!(ext.registry.providers().is_empty());
+    assert!(!process_exists(&pid), "process {pid} is still there (or a zombie)");
+}
+
+#[tokio::test]
+async fn a_manifest_edit_restarts_the_process() {
+    let python = python_or_skip!();
+    let ext = host(python);
+    assert_eq!(ext.ask("a").await, ["echo a"]);
+    let pid = ext.pid();
+    let manifest = ext.root.path().join("echo").join("extension.toml");
+    std::fs::write(&manifest, hosted_manifest(python, "echo")).unwrap();
+    ext.host.reload("echo");
+    assert!(!process_exists(&pid), "the old process {pid} is still there");
+    let new_pid = ext.ask("pid").await;
+    assert_ne!(new_pid, [pid]);
+    assert_eq!(ext.starts(), 2);
+    assert_eq!(ext.registry.providers()[0].keyword(), Some("echo"));
+}
+
+#[tokio::test]
+async fn a_reload_clears_the_failed_state() {
+    let python = python_or_skip!();
+    let ext = host(python);
+    for _ in 0..3 {
+        assert_eq!(ext.ask("die").await, ["echo failed"]);
+        assert_eq!(ext.ask("alive").await, ["echo alive"]);
+    }
+    assert_eq!(ext.ask("die").await, ["echo failed"]);
+    assert_eq!(ext.ask("alive").await, ["echo keeps crashing"]);
+    assert!(ext.star("i").unwrap_err().starts_with("echo: "));
+
+    ext.host.reload("echo");
+    assert_eq!(ext.ask("fresh").await, ["echo fresh"]);
+    assert_eq!(ext.star("i"), Ok(Some("Starred i".to_owned())));
+}
+
+#[tokio::test]
+async fn dropping_the_backend_kills_the_process() {
+    let python = python_or_skip!();
+    let ext = host(python);
+    assert_eq!(ext.ask("a").await, ["echo a"]);
+    let pid = ext.pid();
+    let Hosted { root, backend, registry, host } = ext;
+    // The providers and the host hold the backend too; the last one to go drops it.
+    drop((registry, host));
+    drop(backend);
+    assert!(!process_exists(&pid), "process {pid} is still there (or a zombie)");
+    drop(root);
+}
+
+#[tokio::test]
+async fn a_long_running_extension_answers_through_the_query_engine() {
+    let python = python_or_skip!();
+    let ext = host(python);
+    // The engine gives a provider 100 ms per query; starting Python may take longer on a busy
+    // machine, so the process is started before the engine asks.
+    assert_eq!(ext.ask("warm").await, ["echo warm"]);
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let sink: Sink = Arc::new(move |batch| {
+        let _ = tx.send(batch);
+    });
+    let source = Arc::clone(&ext.registry);
+    let engine = QueryEngine::new(Vec::<Arc<dyn Provider>>::new(), sink, Handle::current())
+        .with_dynamic(Arc::new(move || source.providers()));
+
+    for (session, text) in [(1, "hello"), (2, "again")] {
+        engine.query(session, &format!("e {text}"));
+        let mut titles = Vec::new();
+        loop {
+            let batch =
+                tokio::time::timeout(Duration::from_secs(10), rx.recv()).await.unwrap().unwrap();
+            titles.extend(batch.items.into_iter().map(|item| item.title));
+            if batch.done {
+                break;
+            }
+        }
+        assert_eq!(titles, [format!("echo {text}")]);
+    }
+    let outcome = engine.run_action("echo again", "star").unwrap().unwrap();
+    assert_eq!(outcome.toast.as_deref(), Some("Starred echo again"));
     assert_eq!(ext.starts(), 1);
 }

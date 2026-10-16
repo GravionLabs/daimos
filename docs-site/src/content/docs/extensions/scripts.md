@@ -3,15 +3,17 @@ title: Script extensions
 description: Write an extension as a script that talks JSON Lines over standard input and output.
 since: '0.4'
 banner:
-  content: This page covers one-shot scripts. Long-running scripts and WebAssembly extensions are still in development.
+  content: This page covers script extensions. WebAssembly extensions are still in development.
 ---
 
 A script extension is a program in any language. Daimos starts it, sends it a request as one line
 of JSON, and reads the results from its output. You need nothing but a language that can read a
 line and print JSON.
 
-This page describes the one-shot mode, which is `long_running = false`, the default. Daimos starts
-the program again for every query and every custom action. The design is in
+A script runs in one of two modes. In one-shot mode, `long_running = false` and the default,
+Daimos starts the program again for every query and every custom action. In
+[long-running mode](#long-running-mode) the program starts once and answers many requests. Most of
+this page applies to both; the differences are in their own section. The design is in
 [`docs/specs/extensions.md`](https://github.com/GravionLabs/daimos/blob/main/docs/specs/extensions.md).
 
 ## The manifest
@@ -40,6 +42,9 @@ process; it defaults to `5000` and must be greater than 0. See the
 [manifest reference](../manifest/) for every field.
 
 ## What happens on a query
+
+This is the one-shot mode; a long-running program skips the wait and keeps running, see
+[long-running mode](#long-running-mode).
 
 1. You type. Daimos waits 150 ms after the last keystroke, so typing fast does not start a
    process per letter. A query that you replace during that wait never starts anything.
@@ -122,8 +127,85 @@ Answer with one `result` message:
 reserved for later and is ignored. A program that exits without a `result` counts as done, without
 a message. The same time limit applies, and a failure shows as an error message.
 
-A `cancel` request exists for long-running scripts. A one-shot program never receives it, because
-Daimos stops the process instead.
+A `cancel` request exists for long-running scripts, see
+[long-running mode](#long-running-mode). A one-shot program never receives it, because Daimos
+stops the process instead.
+
+## Long-running mode
+
+A program that is slow to start, or that keeps a connection or a cache, can stay alive between
+queries:
+
+```toml
+[runtime.script]
+command = ["python3", "main.py"]
+long_running = true
+timeout_ms = 5000
+idle_timeout_ms = 600000
+```
+
+**Start.** Daimos starts the program on the first query or custom action of the extension, not
+when it loads the extension. There is no 150 ms wait: every keystroke is sent at once, because no
+process has to start for it.
+
+**Requests and ids.** The program reads requests from standard input, one per line, until the
+input closes. Custom actions arrive on the same input as queries. Every request has a new `id`,
+counting up from 1 for as long as the extension is loaded, also across restarts. Several requests
+can be open at the same time, and the answers may come in any order: Daimos hands every message to
+the request whose `id` it repeats, and ignores messages for an `id` it no longer waits for.
+
+**Cancel.** When you type again before a query is done, Daimos sends a `cancel` request and stops
+waiting for the old query:
+
+```json
+{"id": 4, "type": "cancel", "cancels": 3}
+```
+
+`cancels` is the `id` of the request to drop; the cancel has an `id` of its own. Stop that work if
+you can. Anything you still send for it is ignored, so you do not have to answer a cancel.
+
+**Time limit.** `timeout_ms` applies to every request. When the time is up, the query shows
+`<name> took too long` and Daimos kills the process; the next request starts a new one.
+
+**Crashes.** A program that exits on its own, or writes a line that is not valid JSON, has
+crashed. The open requests show `<name> failed` with the last line from standard error, and the
+next request starts the program again after a short wait that doubles with every restart: 250 ms,
+then 500 ms, then 1 s. After three restarts within a minute, the next crash stops the extension:
+every query shows `<name> keeps crashing` with the last line from standard error, and nothing is
+started any more. Editing a file of the extension (which reloads it) or restarting Daimos gives it
+a fresh start. A process that Daimos stops itself, at the time limit, after the idle time, or on a
+reload, never counts as a crash.
+
+**Idle timeout.** When no request has been open for `idle_timeout_ms` (default ten minutes),
+Daimos closes the standard input of the program, so a loop over the input ends, and kills the
+program if it is still running half a second later. The next query starts it again. A request
+that takes longer than the idle time keeps the process alive.
+
+**Reload and exit.** When you edit, disable or remove the extension, Daimos stops its process; the
+next request starts the new version. When Daimos exits, it stops every long-running process.
+
+A long-running version of the greeter in Python:
+
+```python
+import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if request["type"] == "query":
+        print(json.dumps({
+            "id": request["id"],
+            "type": "items",
+            "done": True,
+            "items": [{"id": "echo", "title": "You typed: " + request["text"]}],
+        }), flush=True)
+    elif request["type"] == "action":
+        print(json.dumps({"id": request["id"], "type": "result", "toast": "Done", "view": None}),
+              flush=True)
+    # "cancel": nothing to stop, every answer above is immediate.
+```
+
+The log works as in one-shot mode; a long-running program appends to it for as long as it runs.
 
 ## Errors, stderr and the log
 
@@ -147,6 +229,7 @@ When something goes wrong, you see one error item below the items that already a
 | The time is up                      | `<name> took too long`        | `timed out after 5 s`                                    |
 | The program cannot be started       | `<name> failed`               | `cannot start <program>: ...`                            |
 | A line is not valid JSON            | `<name> failed`               | The line, shortened to 200 characters                    |
+| A long-running program crashed too often | `<name> keeps crashing`  | The last non-empty line it wrote to standard error, or `restarted too often, stopped` |
 
 Exit with code 0 when everything is fine, and with another code after printing the reason to
 standard error, for example `echo "token expired" >&2; exit 1`.

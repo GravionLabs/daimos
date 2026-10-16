@@ -86,9 +86,13 @@ stdout. stderr goes to the extension log. Every request carries an `id`; the res
 - **One-shot mode** (`long_running = false`): the daimos starts the process per query, writes one
   request, reads until `done: true` or exit. Simplest to write; costs a process spawn per
   keystroke, so results are debounced to 150 ms.
-- **Long-running mode**: the process starts at first use, stays alive while the daimos runs, and
-  handles requests in order. Cancels let it drop stale work. The daimos restarts it on crash and
-  stops it after an idle timeout.
+- **Long-running mode**: the process starts at first use and stays alive while the extension is
+  loaded. Queries are not debounced. Requests get increasing ids from one counter; several can be
+  in flight and the answers are routed by id, so they may interleave. Cancels let it drop stale
+  work, and late answers for a cancelled id are ignored. Custom actions use the same process. The
+  daimos restarts it on crash with a backoff (250 ms, doubling) and gives up after three restarts
+  within a minute until the extension is reloaded; it stops the process after `idle_timeout_ms`
+  without a request, and on unload, reload and exit.
 - Built-in action kinds (`open`, `copy`, `paste`, `run`) are executed by the daimos, so a script
   never has to touch the clipboard or the shell itself.
 
