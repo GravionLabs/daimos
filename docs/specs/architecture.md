@@ -8,14 +8,14 @@ The platform crate hides the three operating systems behind one trait per concer
 flowchart LR
   subgraph Webview["SolidJS (webview, always warm)"]
     UI["Search · Results · Detail · Actions · Forms · Settings"]
-    IPC["ipc.ts (tauri-specta bindings)"]
+    IPC["bindings.ts (tauri-specta) · host.ts"]
     UI --- IPC
   end
   subgraph Rust["Rust (Tauri 2, one resident process)"]
     T["src-tauri<br/>commands, events, tray, window show/hide"]
     C["daimos-core<br/>providers, matcher, ranker, index, actions"]
     P["daimos-platform<br/>hotkey, window, apps, clipboard, paste, icons"]
-    X["daimos-ext<br/>script host, wasm host, manifests, capabilities"]
+    X["daimos-ext<br/>script host, manifests, consent, secrets<br/>(wasm host planned)"]
     S[("SQLite (index, history, settings)")]
     T --> C
     C --> P
@@ -38,18 +38,19 @@ last result list warm, which is what makes the 50 ms budget reachable. Closing t
 hiding it; quitting happens from the tray or the CLI.
 
 A thin `daimos` CLI talks to the process over a local socket (Unix socket on Linux and macOS,
-named pipe on Windows): `daimos toggle`, `daimos show "query"`, `daimos ext install`,
-`daimos ext dev <path>`. On Wayland compositors without the GlobalShortcuts portal, the user binds
-`daimos toggle` in the compositor configuration.
+named pipe on Windows): `daimos toggle`, `daimos show "query"`, `daimos hide`, `daimos quit`,
+`daimos index rebuild|status`, `daimos ext list|install|confirm`. `daimos ext new` and
+`daimos ext dev <path>` are planned with the authoring tooling of M2 (#58). On Wayland compositors
+without the GlobalShortcuts portal, the user binds `daimos toggle` in the compositor configuration.
 
 ## Rust workspace
 
 | Crate                      | Responsibility                                                                                                                                                     |
 | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `crates/daimos-core`     | Domain without Tauri: `Provider` trait, query pipeline, fuzzy matcher (`nucleo-matcher`), frecency ranker, index, actions, settings. Tested and benchmarked with `cargo` |
-| `crates/daimos-platform` | OS integration behind traits: `Hotkey`, `WindowHost`, `AppSource`, `Clipboard`, `Paster`, `IconLoader`, `WindowList`. One module per platform, selected with `cfg` |
-| `crates/daimos-ext`      | Extension host: manifest parsing, script host (JSON Lines over stdio), wasm host (wasmtime + component model), capability checks                                   |
-| `crates/daimos-cli`      | The `daimos` binary: socket client, extension scaffolding                                                                                                        |
+| `crates/daimos-core`     | Domain without Tauri: `Provider` trait, query pipeline, fuzzy matcher (`nucleo-matcher`), frecency ranker, app index, actions, settings, calculator, clipboard history, IPC protocol. Defines the OS-facing traits `AppSource`, `ClipboardBackend` and `Paster` so it runs headless; tested and benchmarked with `cargo` |
+| `crates/daimos-platform` | OS integration: `Hotkey` and `WindowHost` traits plus the implementations of core's `AppSource`, `ClipboardBackend` and `Paster`, the accent color and the session detection (X11, Wayland, Windows, macOS). One module per platform, selected with `cfg` |
+| `crates/daimos-ext`      | Extension host: manifest, extension directory with watch and hot reload, consent records, preferences and secrets (OS keyring), script host (JSON Lines over stdio, one-shot and long-running). The wasm host (wasmtime + component model) is planned (#55) |
+| `crates/daimos-cli`      | The `daimos` binary: socket client, `ext list`, `ext install`, `ext confirm`                                                                                     |
 | `src-tauri`                | Thin layer: commands, events, tray, window lifecycle, plugins                                                                                                      |
 
 ## Query pipeline
@@ -73,7 +74,7 @@ deliberately close to Raycast's so ports are mechanical.
 - **Item**: `id`, `title`, `subtitle`, `icon` (named, file, or data URL), `keywords`, `accessories`,
   `actions`, optional `detail` (Markdown or key/value metadata).
 - **Action**: `id`, `title`, `shortcut`, `kind` (`open`, `copy`, `paste`, `run`, `push`, `form`),
-  payload. `paste` targets the window that was active before the daimos opened.
+  payload. `paste` targets the window that was active before Daimos opened.
 - **View**: a provider can respond with a `list` (the default), a `detail`, a `form` (fields with
   validation), or `push` another view onto the navigation stack. Views are data; the webview renders
   them.
@@ -82,11 +83,11 @@ deliberately close to Raycast's so ports are mechanical.
 
 | Concern            | Linux X11                 | Linux Wayland                                                         | Windows                                                        | macOS                                                   |
 | ------------------ | ------------------------- | --------------------------------------------------------------------- | -------------------------------------------------------------- | ------------------------------------------------------- |
-| Global hotkey      | `global-hotkey` (XGrabKey) | XDG `GlobalShortcuts` portal via `ashpd`; fallback `daimos toggle` | `RegisterHotKey`                                               | `tauri-plugin-global-shortcut` (Carbon/CGEvent)         |
+| Global hotkey      | `tauri-plugin-global-shortcut` (XGrabKey) | XDG `GlobalShortcuts` portal via `ashpd`; fallback `daimos toggle` | `RegisterHotKey`                                               | `tauri-plugin-global-shortcut` (Carbon/CGEvent)         |
 | Window kind        | Override-redirect toplevel | `gtk-layer-shell` overlay where supported; toplevel on GNOME          | `WS_EX_TOOLWINDOW`, no taskbar entry; foreground after hotkey   | `NSPanel`, non-activating, joins all Spaces (`tauri-nspanel`) |
 | App index          | `.desktop` entries, icon theme lookup | same                                                      | Start Menu `.lnk`, `shell:AppsFolder` for packaged apps, icons via `IShellItemImageFactory` | `.app` bundles in standard folders, icons via `NSWorkspace` |
-| Clipboard          | `arboard` + polling       | `wl-clipboard-rs` (`wlr-data-control`)                                | `AddClipboardFormatListener`                                   | `changeCount` polling                                   |
-| Paste into previous window | XTest             | `wtype`/`ydotool` where available, else copy only                      | `SendInput`                                                    | `CGEvent` (needs Accessibility permission)              |
+| Clipboard          | `x11rb`: XFixes selection events, then `TARGETS` | `wlr-data-control` via `wayland-client`; on GNOME (no data-control) the X11 backend follows the clipboard that Mutter mirrors to Xwayland | `AddClipboardFormatListener`                                   | `changeCount` polling                                   |
+| Paste into previous window | XTest via `x11rb`  | `wtype`/`ydotool` where available, else copy only                      | `SendInput`                                                    | `CGEvent` (needs Accessibility permission)              |
 | Autostart          | `tauri-plugin-autostart` (XDG autostart) | same                                                   | same (registry Run key)                                        | same (Login Items)                                      |
 
 Everything the table lists as "where supported" degrades explicitly: the capability is reported to
@@ -94,9 +95,10 @@ the UI and the settings page says what is missing and why.
 
 ## Persistence
 
-SQLite via `rusqlite` (bundled, synchronous, FTS5) in the user data directory: app index, file
-index, frecency, clipboard history, snippets, settings, installed extensions. No secrets in the
-database; API keys for optional AI commands go to the OS keyring (`keyring` crate).
+SQLite via `rusqlite` (bundled, synchronous, FTS5) in the user data directory, one file per
+concern: `index.db` (apps), `frecency.db`, `clipboard.db`, `settings.db` (settings and extension
+preferences). Planned: file index and snippets. No secrets in the database; password preferences
+of extensions and API keys for optional AI commands go to the OS keyring (`keyring` crate).
 
 ## Frontend
 
@@ -104,7 +106,8 @@ SolidJS with Vite and TypeScript. One window, one navigation stack of views. Key
 `↑ ↓` move, `Enter` primary action, `Cmd/Ctrl+K` action panel, `Tab` detail, `Esc` back or hide.
 Styling with CSS variables for light and dark mode and an OS-matched accent. No component library;
 the UI is a list, a detail pane, a form, and a settings page. Bindings to Rust are generated with
-`specta` and `tauri-specta`, as in MCP Studio.
+`specta` and `tauri-specta` into `apps/ui/src/bindings.ts` (`pnpm bindings`);
+`host.ts` wraps them in the `Host` interface that tests replace.
 
 ## Testing
 
@@ -112,7 +115,8 @@ the UI is a list, a detail pane, a form, and a settings page. Bindings to Rust a
   performance budget is a CI check.
 - `daimos-platform`: integration tests per OS in the CI matrix (Ubuntu with X11 and a headless
   `sway` session, Windows, macOS).
-- `daimos-ext`: conformance suite that runs every example extension in both runtimes and compares
-  the item lists.
+- `daimos-ext`: integration tests of the script host in one-shot and long-running mode and a
+  warm-call benchmark against the budget. Planned (#59): a conformance suite that runs every
+  example extension in both runtimes and compares the item lists.
 - Frontend: Vitest for the view model; the rendering is thin enough to leave to manual checks and
   screenshots in CI.

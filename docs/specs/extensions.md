@@ -2,8 +2,13 @@
 
 Two runtimes, one data model, one manifest. A script extension is a program in any language that
 speaks JSON Lines over stdin and stdout. A wasm extension is a WebAssembly component that
-implements the daimos's WIT interface and runs inside wasmtime with only the capabilities its
+implements the Daimos WIT interface and runs inside wasmtime with only the capabilities its
 manifest declares.
+
+**Status:** the manifest, the extension directory with hot reload, the capability prompt, secrets in
+the OS keyring and the script runtime (one-shot and long-running) are shipped. The wasm runtime
+(#55, #56, #57), `daimos ext new` and `daimos ext dev` (#58), and the example extensions with the
+conformance suite (#59) are planned for M2.
 
 | Runtime | Best for                                     | Isolation                                  | Call latency          |
 | ------- | -------------------------------------------- | ------------------------------------------ | --------------------- |
@@ -20,8 +25,10 @@ manifest declares.
   main.wasm           wasm runtime: a component
 ```
 
-The CLI scaffolds both: `daimos ext new --script python`, `daimos ext new --wasm rust`.
-`daimos ext dev <path>` loads an extension from a working directory with hot reload.
+Today `daimos ext install <source>` copies an extension into this directory and `daimos ext confirm`
+accepts its capabilities. Planned (#58): `daimos ext new --script python`,
+`daimos ext new --wasm rust` scaffold both kinds, and `daimos ext dev <path>` loads an extension
+from a working directory with hot reload.
 
 ## Manifest
 
@@ -66,7 +73,7 @@ network host it did not declare gets an error, not a prompt. A script extension 
 
 ## Script protocol
 
-JSON Lines, UTF-8, one message per line, requests from the daimos on stdin and responses on
+JSON Lines, UTF-8, one message per line, requests from Daimos on stdin and responses on
 stdout. stderr goes to the extension log. Every request carries an `id`; the response repeats it.
 
 ```jsonc
@@ -83,16 +90,16 @@ stdout. stderr goes to the extension log. Every request carries an `id`; the res
 {"id": 3, "type": "cancel", "cancels": 1}
 ```
 
-- **One-shot mode** (`long_running = false`): the daimos starts the process per query, writes one
+- **One-shot mode** (`long_running = false`): Daimos starts the process per query, writes one
   request, reads until `done: true` or exit. Simplest to write; costs a process spawn per
   keystroke, so results are debounced to 150 ms.
-- **Long-running mode**: the process starts at first use, stays alive while the daimos runs, and
-  handles requests in order. Cancels let it drop stale work. The daimos restarts it on crash and
-  stops it after an idle timeout.
-- Built-in action kinds (`open`, `copy`, `paste`, `run`) are executed by the daimos, so a script
+- **Long-running mode**: the process starts at first use, stays alive while Daimos runs, and
+  handles requests in order. Cancels let it drop stale work. Daimos restarts it on crash (with
+  backoff and a limit) and stops it after an idle timeout.
+- Built-in action kinds (`open`, `copy`, `paste`, `run`) are executed by Daimos, so a script
   never has to touch the clipboard or the shell itself.
 
-## Wasm runtime
+## Wasm runtime (planned, #55–#57)
 
 The host is wasmtime with the component model. The interface is a WIT package; language bindings
 come from `wit-bindgen` (Rust, C), `componentize-js` (JavaScript, TypeScript), `componentize-py`
@@ -136,11 +143,11 @@ world extension {
   through `host.preference` and never reach the guest as files.
 - **Instances are pooled**: components are compiled once and cached on disk (wasmtime's
   serialization), instances are reused between queries, and a query runs with an epoch deadline so
-  a runaway extension is interrupted, not the daimos.
+  a runaway extension is interrupted, not Daimos.
 - **Streaming** is not in the first interface version: a wasm query returns its list in one call,
   which is fine inside the 5 ms budget. A later version may add a `stream` export.
 
-## Conformance
+## Conformance (planned, #59)
 
 `examples/` holds the same extension in four languages: Bash and Python as scripts, Rust and
 JavaScript as components. The conformance suite runs each one against a fixed input and expects
@@ -149,5 +156,5 @@ identical item lists. This is the gate of the M2 milestone.
 ## Catalog (M4)
 
 A Git repository with one directory per extension: manifest, icon, and a signed `main.wasm` or the
-script sources. The daimos clones it, shows the entries, and installs with the capability prompt.
+script sources. Daimos clones it, shows the entries, and installs with the capability prompt.
 Only wasm extensions are listed as "sandboxed"; script extensions in the catalog require review.

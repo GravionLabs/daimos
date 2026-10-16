@@ -9,8 +9,8 @@ is built with Tauri 2, a Rust core, and a SolidJS frontend.
 
 ## Audience
 
-- Developers and power users on Linux who want a Raycast-class daimos, including on Wayland.
-- People who work on more than one operating system and want one daimos, one set of extensions,
+- Developers and power users on Linux who want a Raycast-class launcher, including on Wayland.
+- People who work on more than one operating system and want one launcher, one set of extensions,
   and one muscle memory everywhere.
 - Extension authors who want to write a command once, in the language of their choice, and ship it
   to all three platforms.
@@ -20,8 +20,8 @@ is built with Tauri 2, a Rust core, and a SolidJS frontend.
 - **Raycast** is macOS-first (Windows in beta), closed source, and its extension API is
   TypeScript/React only. Daimos is open source, Linux-first in effort, and runs extensions as
   scripts or WebAssembly components.
-- **Alfred** and **Spotlight** are macOS only. **PowerToys Run** and **Flow Daimos** are Windows
-  only. **Udaimos**, **Albert**, **Vicinae**, and **rofi** are Linux only, and most of them
+- **Alfred** and **Spotlight** are macOS only. **PowerToys Run** and **Flow Launcher** are Windows
+  only. **Ulauncher**, **Albert**, **Vicinae**, and **rofi** are Linux only, and most of them
   struggle on Wayland.
 - Differentiators: first-class Wayland support, one extension format for three platforms with a
   sandbox the user can see, and a start-up budget that is treated as a feature.
@@ -46,7 +46,7 @@ is built with Tauri 2, a Rust core, and a SolidJS frontend.
 | Feature              | Milestone       | Scope                                                                                                                        |
 | -------------------- | --------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | Hotkey and window    | M0              | Global hotkey on X11, Wayland (portal + compositor fallback), Windows, macOS; show/hide without focus theft; tray; autostart |
-| Application daimos   | M1 (v0.1)       | Index of installed apps with icons on all three platforms; fuzzy search; frecency ranking; open, reveal, copy path           |
+| Application launcher | M1 (v0.1)       | Index of installed apps with icons on all three platforms; fuzzy search; frecency ranking; open, reveal, copy path           |
 | Calculator and units | M1 (v0.1)       | Inline math, unit and currency conversion, copy result                                                                       |
 | Settings             | M1 (v0.1)       | Hotkey, theme, search providers on/off, per-command aliases                                                                  |
 | Extension runtime    | M2 (v0.4)       | Script protocol (JSON Lines over stdio) and WebAssembly components (wasmtime); manifest; capability prompts; hot reload      |
@@ -60,13 +60,25 @@ is built with Tauri 2, a Rust core, and a SolidJS frontend.
 | MCP bridge           | M4 (v0.6)       | Tools and prompts of configured MCP servers as commands                                                                      |
 | AI commands          | M4 (v0.6)       | Optional, BYOK: ask, rewrite selection, summarize clipboard                                                                  |
 
-The MVP covers the core loop: hotkey, type, launch an app, and do it faster than the OS daimos on
-all three platforms. Extensions come second, once the window and latency budget are solid, because
+The MVP covers the core loop: hotkey, type, launch an app, and do it faster than the launcher of the OS
+on all three platforms. Extensions come second, once the window and latency budget are solid, because
 every extension is judged against that budget.
 
 ## Status
 
-Planning. No code yet.
+The last release is **v0.3.2** (2026-10-12); `release/0.4` is open.
+
+- **Shipped:** M0 and M1 (hotkey and window on all platforms, application launcher,
+  calculator, settings, performance budget in CI) and the clipboard half of M3 (history and paste
+  into the previous window, v0.2 and v0.3).
+- **In progress (M2, v0.4):** manifest, extension directory, hot reload, capability prompt,
+  secrets in the OS keyring and the script runtime in one-shot and long-running mode are done.
+  The wasm runtime, `daimos ext new` and `daimos ext dev`, the example extensions and the
+  conformance suite are open.
+- **Not started:** the rest of M3 (v0.5), M4 (v0.6) and the v1.0 packaging work.
+- **Open gates:** the manual M0 gate (hotkey on KDE and GNOME Wayland, panel over a full-screen
+  app on macOS, window at 150 % on Windows) has not been run on real desktops; packages are
+  unsigned and there is no `rpm`, AppImage or MSI yet (see `docs/releasing.md`).
 
 ## Epics
 
@@ -86,18 +98,24 @@ Wayland (KDE Plasma and GNOME), Windows 11, and macOS.
 | Milestone                            | Scope                                                                                                                                                                          | Gate                                                                                                                                          |
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | M0 Foundation                        | Scaffold (Tauri 2, SolidJS, pnpm, Vitest, Cargo workspace, CI matrix); spikes: global hotkey incl. XDG portal, NSPanel on macOS, foreground on Windows, layer-shell on Wayland | The hotkey toggles the window on all three platforms; on macOS the previous app keeps focus; on KDE and GNOME Wayland without an X11 fallback |
-| M1 MVP (v0.1)                        | App index with icons, fuzzy matcher, frecency, actions, calculator, settings, tray, autostart, performance harness                                                             | Daily-driver replacement for Spotlight, PowerToys Run, and the GNOME/KDE daimos for launching apps; hotkey to window under 50 ms warm         |
+| M1 MVP (v0.1)                        | App index with icons, fuzzy matcher, frecency, actions, calculator, settings, tray, autostart, performance harness                                                             | Daily-driver replacement for Spotlight, PowerToys Run, and the GNOME/KDE launchers for launching apps; hotkey to window under 50 ms warm         |
 | M2 Extensions (v0.4)                 | Script protocol, wasm runtime with WIT interface, manifest, capability prompts, extension directory, hot reload, example extensions, authoring docs                            | One example extension written as a script and as a wasm component behaves identically on all three platforms                                  |
 | M3 Everyday tools (v0.2, v0.3, v0.5) | Clipboard history, snippets, file search, window switcher, system commands, emoji                                                                                              | Paste from clipboard history into the previous window works on all three platforms, including Wayland                                         |
 | M4 Ecosystem (v0.6)                  | Extension catalog, MCP bridge, optional AI commands                                                                                                                            | An extension is installed from the catalog and an MCP tool runs as a command                                                                  |
 | v1.0                                 | Signed builds (dmg, msi, deb, rpm, AppImage, Flatpak), auto-update, docs site                                                                                                  | —                                                                                                                                             |
 
+The order of delivery differs from the numbering: the clipboard part of M3 shipped before M2
+because its gate (paste into the previous window on every platform) tests the window and focus
+model that extensions build on.
+
 ```mermaid
 flowchart TD
   M0["M0 Foundation"] -->|"hotkey toggles window on all platforms, no focus theft"| M1["M1 MVP · v0.1"]
-  M1 -->|"daily driver for app launching, < 50 ms"| M2["M2 Extensions · v0.4"]
-  M2 -->|"script and wasm extension behave identically"| M3["M3 Everyday tools · v0.5"]
-  M3 -->|"paste into previous window works everywhere"| M4["M4 Ecosystem · v0.6"]
+  M1 -->|"daily driver for app launching, < 50 ms"| M3a["M3 Clipboard history · v0.2, v0.3"]
+  M3a -->|"paste into previous window works everywhere"| M2["M2 Extensions · v0.4"]
+  M2 -->|"script and wasm extension behave identically"| M3b["M3 Everyday tools · v0.5"]
+  M3b -->|"snippets, files, windows, system commands"| M4["M4 Ecosystem · v0.6"]
+  M4 -->|"catalog install and MCP tool run"| V1["v1.0 · signed builds, auto-update"]
 ```
 
 ## Performance budget
@@ -141,14 +159,21 @@ The budget is enforced from M1 with a benchmark harness; a feature that breaks i
 - **One resident process**: the Tauri process holds the index and hotkey and hides or shows its
   window; a separate `daimos` CLI talks to it over a local socket.
 - **Platforms**: Linux, Windows, and macOS together from M0; nothing ships that works on two.
+- **License**: `MIT OR Apache-2.0` ([ADR 0004](../adr/0004-license.md)).
+- **Releases**: a release is the merge of a `release/<x.y>` branch into `main`; GitVersion numbers
+  it, git-cliff writes the notes ([ADR 0005](../adr/0005-release-and-versioning.md)).
+- **Script extensions run unsandboxed, with consent**: declared capabilities are shown, confirmed
+  once per version and recorded outside the manifest; passwords live only in the OS keyring
+  ([ADR 0006](../adr/0006-script-extension-security.md)).
+- **Clipboard history**: off by default, SQLite, bounded, never stores concealed content; on
+  GNOME it follows the clipboard through Xwayland
+  ([ADR 0007](../adr/0007-clipboard-history-storage.md)).
 
 ### Open
 
 - **Name**: "Daimos" is a placeholder.
-- **License**: open source; `MIT OR Apache-2.0` as in MCP Studio, or a copyleft license to keep
-  forks open. Decide before the first public commit.
 - **Extension signing**: who signs catalog entries, and whether unsigned extensions install with a
-  warning or not at all.
+  warning or not at all (#69).
 
 ## Related documents
 
@@ -157,3 +182,7 @@ The budget is enforced from M1 with a benchmark harness; a feature that breaks i
 - [ADR 0001 — Stack and architecture](../adr/0001-stack-and-architecture.md)
 - [ADR 0002 — Extension model](../adr/0002-extension-model.md)
 - [ADR 0003 — Wayland first](../adr/0003-wayland-first.md)
+- [ADR 0004 — License](../adr/0004-license.md)
+- [ADR 0005 — Release and versioning](../adr/0005-release-and-versioning.md)
+- [ADR 0006 — Script extension security](../adr/0006-script-extension-security.md)
+- [ADR 0007 — Clipboard history storage](../adr/0007-clipboard-history-storage.md)
