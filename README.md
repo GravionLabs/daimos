@@ -53,3 +53,7 @@ pnpm lint && pnpm test
 - [ADR 0001 — Stack and architecture](docs/adr/0001-stack-and-architecture.md)
 - [ADR 0002 — Extension model](docs/adr/0002-extension-model.md)
 - [ADR 0003 — Wayland first](docs/adr/0003-wayland-first.md)
+- [ADR 0004 — License](docs/adr/0004-license.md)
+- [ADR 0005 — Release and versioning](docs/adr/0005-release-and-versioning.md)
+- [ADR 0006 — Script extension security](docs/adr/0006-script-extension-security.md)
+- [ADR 0007 — Clipboard history storage](docs/adr/0007-clipboard-history-storage.md)

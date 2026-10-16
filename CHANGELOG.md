@@ -5,6 +5,18 @@ Versioning follows [Semantic Versioning](https://semver.org/) and GitVersion (Gi
 
 ---
 
+## [0.3.2] — 2026-10-12
+
+Release pipeline only: the release workflow may close issues and comment on pull requests (#173).
+No user-visible changes.
+
+
+## [0.3.1] — 2026-10-12
+
+Release pipeline only: `next-version` left `GitVersion.yml` after the first stable release (#139).
+No user-visible changes.
+
+
 ## [0.3.0] — 2026-10-12
 
 ### Bug Fixes
