@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use daimos_core::model::{self, ItemBatch};
@@ -21,6 +21,7 @@ use crate::manifest::{Manifest, Runtime, ScriptRuntime};
 use crate::preferences::Preferences;
 use crate::protocol::{self, Request, Response};
 use crate::provider::Backend;
+use crate::session::Session;
 
 /// `CREATE_NO_WINDOW`: no console window flashes when the script starts on Windows.
 #[cfg(windows)]
@@ -49,6 +50,9 @@ pub enum Failure {
     Exit { code: Option<i32>, stderr: Option<String> },
     /// The process wrote something that is not a protocol message.
     Protocol(String),
+    /// A long-running process crashed more often than it may be restarted; carries the last
+    /// stderr line of the last crash. The extension stays failed until it is reloaded.
+    KeepsCrashing(Option<String>),
 }
 
 /// What a running query reports.
@@ -69,6 +73,8 @@ impl Failure {
             Self::Exit { stderr: Some(line), .. } => line.clone(),
             Self::Exit { code: Some(code), .. } => format!("exited with code {code}"),
             Self::Exit { code: None, .. } => "was stopped before it finished".to_owned(),
+            Self::KeepsCrashing(Some(line)) => line.clone(),
+            Self::KeepsCrashing(None) => "restart limit reached; reload the extensions".to_owned(),
         }
     }
 }
@@ -127,17 +133,24 @@ impl OneShot {
         preferences: BTreeMap<String, String>,
         cancel: CancellationToken,
     ) -> BoxStream<'static, ItemBatch> {
-        let extension = self.extension.clone();
-        self.query(command, text, preferences, cancel)
-            .map(move |event| match event {
-                Event::Items(items) => ItemBatch::from(items),
-                Event::Failed(failure) => ItemBatch::from(vec![failure_item(&extension, &failure)]),
-            })
-            .boxed()
+        batches(&self.extension, self.query(command, text, preferences, cancel))
     }
 
     pub fn timeout(&self) -> Duration {
         self.timeout
+    }
+
+    pub(crate) fn extension(&self) -> &str {
+        &self.extension
+    }
+
+    /// The program as the manifest names it, for messages.
+    pub(crate) fn command_name(&self) -> &str {
+        &self.command[0]
+    }
+
+    pub(crate) fn log_path(&self) -> Option<PathBuf> {
+        self.log.clone()
     }
 
     /// Starts the script for one query and streams what it answers. The process starts when the
@@ -220,7 +233,7 @@ impl OneShot {
 
     /// The program path: a relative path with a separator is relative to the extension directory
     /// on every platform.
-    fn program(&self) -> PathBuf {
+    pub(crate) fn program(&self) -> PathBuf {
         let program = Path::new(&self.command[0]);
         if program.is_relative() && self.command[0].contains(['/', '\\']) {
             self.dir.join(program)
@@ -229,7 +242,7 @@ impl OneShot {
         }
     }
 
-    fn spawn(&self) -> std::io::Result<Child> {
+    pub(crate) fn spawn(&self) -> std::io::Result<Child> {
         let mut command = Command::new(self.program());
         command
             .args(&self.command[1..])
@@ -318,12 +331,63 @@ async fn start(pending: Pending) -> Option<(Step, State)> {
     step(run).await
 }
 
-/// Runs the one-shot script extensions (`runtime = "script"`, `long_running = false`). Queries of
-/// other extensions (wasm, long-running scripts) get no answer until their hosts exist.
+/// How the script of one extension runs.
+#[derive(Debug, Clone)]
+enum Runner {
+    /// A process per request (`long_running = false`).
+    OneShot(OneShot),
+    /// One process for all requests (`long_running = true`).
+    Session(Session),
+}
+
+impl Runner {
+    fn extension(&self) -> &str {
+        match self {
+            Self::OneShot(shot) => shot.extension(),
+            Self::Session(session) => session.extension(),
+        }
+    }
+
+    fn query_batches(
+        &self,
+        command: &str,
+        text: &str,
+        preferences: BTreeMap<String, String>,
+        cancel: CancellationToken,
+    ) -> BoxStream<'static, ItemBatch> {
+        match self {
+            Self::OneShot(shot) => shot.query_batches(command, text, preferences, cancel),
+            Self::Session(session) => session.query_batches(command, text, preferences, cancel),
+        }
+    }
+
+    async fn action(
+        &self,
+        command: &str,
+        item: &str,
+        action: &str,
+        cancel: CancellationToken,
+    ) -> Result<Option<String>, Failure> {
+        match self {
+            Self::OneShot(shot) => shot.action(command, item, action, cancel).await,
+            Self::Session(session) => session.action(command, item, action, cancel).await,
+        }
+    }
+
+    /// Ends what the runner keeps running.
+    fn stop(&self) {
+        if let Self::Session(session) = self {
+            session.shutdown();
+        }
+    }
+}
+
+/// Runs the script extensions (`runtime = "script"`), one-shot and long-running. Queries of other
+/// extensions (wasm) get no answer until their hosts exist.
 #[derive(Default)]
 pub struct ScriptBackend {
     /// By extension name.
-    runners: RwLock<BTreeMap<String, OneShot>>,
+    runners: RwLock<BTreeMap<String, Runner>>,
     /// Where `logs/<extension>.log` goes; no logging without it.
     data_dir: Option<PathBuf>,
     /// The manifests of the loaded extensions, for their preferences.
@@ -350,7 +414,7 @@ impl ScriptBackend {
         self
     }
 
-    fn runner(&self, extension: &str) -> Option<OneShot> {
+    fn runner(&self, extension: &str) -> Option<Runner> {
         self.runners.read().unwrap_or_else(|e| e.into_inner()).get(extension).cloned()
     }
 }
@@ -371,10 +435,15 @@ impl Backend for ScriptBackend {
         let store = self.preferences.clone();
         let command = command.to_owned();
         let QueryContext { text, cancel, .. } = ctx;
-        // A newer keystroke cancels this query during the delay, so no process starts for it.
+        // A newer keystroke cancels this query during the delay, so no process starts for it. A
+        // long-running script has no spawn cost to save: it is asked right away.
+        let debounce = matches!(runner, Runner::OneShot(_));
         let wait = {
             let cancel = cancel.clone();
             async move {
+                if !debounce {
+                    return !cancel.is_cancelled();
+                }
                 tokio::select! {
                     biased;
                     () = cancel.cancelled() => false,
@@ -429,7 +498,7 @@ impl Backend for ScriptBackend {
                 .map_err(|error| error.to_string())?;
             runtime
                 .block_on(runner.action(&command, &item, &action, CancellationToken::new()))
-                .map_err(|failure| format!("{}: {}", runner.extension, failure.message()))
+                .map_err(|failure| format!("{}: {}", runner.extension(), failure.message()))
         })
         .join();
         outcome.unwrap_or_else(|_| Err(format!("{extension} stopped unexpectedly")))
@@ -443,28 +512,60 @@ impl Backend for ScriptBackend {
             .unwrap_or_else(|e| e.into_inner())
             .insert(name.clone(), manifest.clone());
         let mut runners = self.runners.write().unwrap_or_else(|e| e.into_inner());
-        runners.remove(name);
+        // A reload starts from scratch: the old process and its failed state are gone.
+        if let Some(old) = runners.remove(name) {
+            old.stop();
+        }
         let script = match (&manifest.runtime.script, manifest.extension.runtime) {
-            (Some(script), Runtime::Script) if !script.long_running => script,
+            (Some(script), Runtime::Script) => script,
             _ => return,
         };
-        let mut runner = OneShot::new(name, extension.dir.clone(), script);
-        if let Some(data_dir) = &self.data_dir {
-            runner = runner.with_log(dir::log_path_in(data_dir, name));
-        }
+        let log = self.data_dir.as_ref().map(|data_dir| dir::log_path_in(data_dir, name));
+        let runner = if script.long_running {
+            let session = Session::new(name, extension.dir.clone(), script);
+            Runner::Session(match log {
+                Some(log) => session.with_log(log),
+                None => session,
+            })
+        } else {
+            let shot = OneShot::new(name, extension.dir.clone(), script);
+            Runner::OneShot(match log {
+                Some(log) => shot.with_log(log),
+                None => shot,
+            })
+        };
         runners.insert(name.clone(), runner);
     }
 
     fn unload(&self, name: &str) {
-        self.runners.write().unwrap_or_else(|e| e.into_inner()).remove(name);
+        let old = self.runners.write().unwrap_or_else(|e| e.into_inner()).remove(name);
+        if let Some(old) = old {
+            old.stop();
+        }
         self.manifests.write().unwrap_or_else(|e| e.into_inner()).remove(name);
     }
+}
+
+/// The events of a query as batches for a provider: a failure becomes one error item after the
+/// items that came before it.
+pub(crate) fn batches(
+    extension: &str,
+    events: BoxStream<'static, Event>,
+) -> BoxStream<'static, ItemBatch> {
+    let extension = extension.to_owned();
+    events
+        .map(move |event| match event {
+            Event::Items(items) => ItemBatch::from(items),
+            Event::Failed(failure) => ItemBatch::from(vec![failure_item(&extension, &failure)]),
+        })
+        .boxed()
 }
 
 /// The error item of a failed run.
 pub fn failure_item(extension: &str, failure: &Failure) -> model::Item {
     let title = match failure {
         Failure::Timeout(_) => format!("{extension} took too long"),
+        Failure::KeepsCrashing(_) => format!("{extension} keeps crashing"),
         _ => format!("{extension} failed"),
     };
     crate::provider::error_item(
@@ -478,11 +579,22 @@ pub fn failure_item(extension: &str, failure: &Failure) -> model::Item {
 /// Appends the lines of `stderr` to the log (when there is one) and returns the last non-empty
 /// line. A log that cannot be written is given up on; the run does not notice.
 async fn pump_stderr(stderr: impl AsyncRead + Unpin, log: Option<PathBuf>) -> Option<String> {
+    let last = Arc::new(Mutex::new(None));
+    pump_stderr_into(stderr, log, &last).await;
+    last.lock().unwrap_or_else(|e| e.into_inner()).take()
+}
+
+/// Like [`pump_stderr`], and keeps the last non-empty line in `last` while it reads, so a
+/// long-running process can be asked for it at any time.
+pub(crate) async fn pump_stderr_into(
+    stderr: impl AsyncRead + Unpin,
+    log: Option<PathBuf>,
+    last: &Mutex<Option<String>>,
+) {
     let mut file = match log {
         Some(path) => open_log(&path).await,
         None => None,
     };
-    let mut last = None;
     let mut lines = BufReader::new(stderr).lines();
     let mut written = 0_u64;
     while let Ok(Some(line)) = lines.next_line().await {
@@ -495,10 +607,9 @@ async fn pump_stderr(stderr: impl AsyncRead + Unpin, log: Option<PathBuf>) -> Op
             }
         }
         if !line.trim().is_empty() {
-            last = Some(line.trim().to_owned());
+            *last.lock().unwrap_or_else(|e| e.into_inner()) = Some(line.trim().to_owned());
         }
     }
-    last
 }
 
 /// Opens the log for appending, creating its folder and moving an oversized log aside.
@@ -895,8 +1006,12 @@ mod tests {
 
     #[test]
     fn the_runner_takes_its_timeout_from_the_manifest() {
-        let runtime =
-            ScriptRuntime { command: vec!["x".into()], long_running: false, timeout_ms: 1234 };
+        let runtime = ScriptRuntime {
+            command: vec!["x".into()],
+            long_running: false,
+            timeout_ms: 1234,
+            idle_timeout_ms: 600_000,
+        };
         let shot = OneShot::new("demo", PathBuf::from("."), &runtime);
         assert_eq!(shot.timeout(), Duration::from_millis(1234));
     }
@@ -1177,16 +1292,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn long_running_unknown_and_unloaded_extensions_are_unaffected() {
+    async fn unknown_and_unloaded_extensions_are_unaffected_and_long_running_ones_load_lazily() {
         let python = python_or_skip!();
         let root = tempfile::tempdir().unwrap();
         let backend = ScriptBackend::new();
         let cancel = CancellationToken::new();
         // Never loaded.
         assert!(query_of(&backend, "x", &cancel).collect::<Vec<_>>().await.is_empty());
-        // Long-running: stays a stub until its own host exists.
+        // Long-running: a session, started by the first query (not by the load).
         backend.load(&install(root.path(), python, true, &counting_script()));
-        assert!(query_of(&backend, "x", &cancel).collect::<Vec<_>>().await.is_empty());
+        assert!(matches!(backend.runner("demo"), Some(Runner::Session(_))));
+        assert_eq!(runs(root.path()), 0);
         // One-shot, then unloaded again.
         backend.load(&install(root.path(), python, false, &counting_script()));
         assert_eq!(query_of(&backend, "x", &cancel).collect::<Vec<_>>().await.len(), 1);
@@ -1201,9 +1317,12 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         // The manifest need not run for this: only the loaded runner is looked at.
         backend.load(&install(root.path(), "python3", false, ""));
-        let log = backend.runner("demo").unwrap().log;
-        assert_eq!(log, Some(Path::new("data").join("logs").join("demo.log")));
-        assert_eq!(ScriptBackend::new().runner("demo").map(|r| r.log), None);
+        let Some(Runner::OneShot(shot)) = backend.runner("demo") else { panic!("not one-shot") };
+        assert_eq!(shot.log_path(), Some(Path::new("data").join("logs").join("demo.log")));
+        let plain = ScriptBackend::new();
+        plain.load(&install(root.path(), "python3", false, ""));
+        let Some(Runner::OneShot(shot)) = plain.runner("demo") else { panic!("not one-shot") };
+        assert_eq!(shot.log_path(), None);
     }
 
     /// A script that answers a query with one item and an action with a toast.

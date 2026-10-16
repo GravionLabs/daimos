@@ -20,3 +20,8 @@ p95_ms = 20
 [[benchmark]]
 match = "frecency_load_10k/*"
 p95_ms = 50
+
+# One query round trip to a warm long-running Python script (crates/daimos-ext/benches/script_warm.rs).
+[[benchmark]]
+match = "script_warm_round_trip/*"
+p95_ms = 30

@@ -3,15 +3,17 @@ title: Script extensions
 description: Write an extension as a script that talks JSON Lines over standard input and output.
 since: '0.4'
 banner:
-  content: This page covers one-shot scripts. Long-running scripts and WebAssembly extensions are still in development.
+  content: WebAssembly extensions are still in development.
 ---
 
 A script extension is a program in any language. Daimos starts it, sends it a request as one line
 of JSON, and reads the results from its output. You need nothing but a language that can read a
 line and print JSON.
 
-This page describes the one-shot mode, which is `long_running = false`, the default. Daimos starts
-the program again for every query and every custom action. The design is in
+A script runs in one of two modes. In the one-shot mode, which is `long_running = false` and the
+default, Daimos starts the program again for every query and every custom action. In the
+[long-running mode](#long-running-mode) the program starts once and answers many requests. The
+design is in
 [`docs/specs/extensions.md`](https://github.com/GravionLabs/daimos/blob/main/docs/specs/extensions.md).
 
 ## The manifest
@@ -122,8 +124,74 @@ Answer with one `result` message:
 reserved for later and is ignored. A program that exits without a `result` counts as done, without
 a message. The same time limit applies, and a failure shows as an error message.
 
-A `cancel` request exists for long-running scripts. A one-shot program never receives it, because
-Daimos stops the process instead.
+A `cancel` request exists for long-running scripts, see below. A one-shot program never receives
+it, because Daimos stops the process instead.
+
+## Long-running mode
+
+Set `long_running = true` when starting the program costs too much for every keystroke, for example
+because it loads a large index or opens a connection.
+
+```toml
+[runtime.script]
+command = ["python3", "main.py"]
+long_running = true
+timeout_ms = 5000
+idle_timeout_ms = 600000
+```
+
+- **Start.** Daimos starts the program the first time you use one of its commands and keeps it
+  running. Queries are not delayed by the 150 ms wait of one-shot scripts.
+- **Requests.** The program reads one request per line from standard input until the input ends,
+  and answers on standard output. The `id` of the requests increases by one for every request.
+  Every answer repeats the `id` of its request, so you can answer in any order, and you can work
+  on several requests at the same time. A query ends with a message that has `"done": true`; an
+  `action` ends with its `result`. Standard input ends when Daimos stops the program, so exit when
+  it does.
+- **Cancel.** When you type again, the earlier query is superseded and Daimos sends
+
+  ```json
+  {"id": 7, "type": "cancel", "cancels": 5}
+  ```
+
+  `cancels` is the `id` of the request to drop. Stop working on it if you can. You send no answer
+  to a `cancel`, and anything you still send for request 5 is ignored.
+- **Time limit.** `timeout_ms` applies to every request. When one takes longer, Daimos kills the
+  program, shows `<name> took too long`, and starts it again with the next request.
+- **Crashes.** When the program exits or closes its output on its own, requests that were waiting
+  fail with the last line it wrote to standard error. The next request starts it again after a
+  short wait: 250 ms, then 500 ms, then 1 s. Daimos restarts the program at most three times
+  within any 60 seconds. After that the extension shows one item, `<name> keeps crashing`, with
+  the last line of standard error, until the extension is reloaded, which
+  happens when you save a file in its folder (see [hot reload](../#hot-reload)). Stops that Daimos asked for do not count.
+- **Idle.** After `idle_timeout_ms` without a request (default `600000`, ten minutes) Daimos
+  closes the standard input of the program and stops it if it does not exit within half a second.
+  The next query starts it again. `idle_timeout_ms` has no effect with `long_running = false`.
+- **Unload and quit.** The program is stopped when the extension is unloaded, reloaded or removed,
+  and when Daimos quits.
+
+A Python program that answers every query and honors `cancel`:
+
+```python
+import json
+import sys
+
+cancelled = set()
+for line in sys.stdin:
+    request = json.loads(line)
+    if request["type"] == "cancel":
+        cancelled.add(request["cancels"])
+    elif request["type"] == "query" and request["id"] not in cancelled:
+        print(json.dumps({
+            "id": request["id"],
+            "type": "items",
+            "done": True,
+            "items": [{"id": "echo", "title": "You typed: " + request["text"]}],
+        }), flush=True)
+```
+
+Both modes return the same items for the same program. Write to standard error for diagnostics in
+both; the log file is the same.
 
 ## Errors, stderr and the log
 
@@ -147,6 +215,7 @@ When something goes wrong, you see one error item below the items that already a
 | The time is up                      | `<name> took too long`        | `timed out after 5 s`                                    |
 | The program cannot be started       | `<name> failed`               | `cannot start <program>: ...`                            |
 | A line is not valid JSON            | `<name> failed`               | The line, shortened to 200 characters                    |
+| A long-running program keeps crashing | `<name> keeps crashing`     | The last non-empty line it wrote to standard error       |
 
 Exit with code 0 when everything is fine, and with another code after printing the reason to
 standard error, for example `echo "token expired" >&2; exit 1`.
@@ -208,5 +277,6 @@ The protocol is the same on X11, Wayland (KDE and GNOME), Windows, and macOS.
 - **Results come late.** The program writes to a buffer. Flush after every line.
 - **"took too long".** Raise `timeout_ms`, or send a first `items` message early and the rest
   later.
+- **"keeps crashing".** Read the log, fix the program, then save a file in its folder to reload it.
 - Other problems are collected in the [extension commands](../cli/) page, which shows whether
   Daimos loaded the extension at all.

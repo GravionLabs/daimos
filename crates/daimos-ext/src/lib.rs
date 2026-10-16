@@ -11,6 +11,7 @@ pub mod provider;
 pub mod registry;
 pub mod script;
 pub mod secrets;
+pub mod session;
 pub mod watch;
 
 pub use error::ManifestError;
@@ -25,4 +26,5 @@ pub use provider::{
 pub use registry::{ExtensionRecord, ExtensionState, Registry};
 pub use script::{Failure, OneShot, ScriptBackend};
 pub use secrets::{MockSecretStore, OsSecretStore, SecretError, SecretStore};
+pub use session::{RestartPolicy, Session};
 pub use watch::{ExtensionHost, ExtensionWatcher};

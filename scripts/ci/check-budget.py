@@ -36,7 +36,7 @@ for info in criterion.glob("**/new/benchmark.json"):
     results[name] = p95_ms(json.loads(sample.read_text(encoding="utf-8")))
 
 if not results:
-    sys.exit(f"no criterion results in {criterion}; run `cargo bench -p daimos-core` first")
+    sys.exit(f"no criterion results in {criterion}; run `cargo bench -p daimos-core -p daimos-ext` first")
 
 lines = ["| Benchmark | p95 | Budget | Status |", "| --- | ---: | ---: | --- |"]
 failed = False
