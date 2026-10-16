@@ -889,8 +889,13 @@ pub(crate) async fn pump_stderr(
         };
         if let Some(open) = file.as_mut() {
             written += line.len() as u64 + 1;
-            // One run cannot grow the log past the limit, however much it writes.
-            if written > LOG_LIMIT || open.write_all(format!("{line}\n").as_bytes()).await.is_err()
+            // One run cannot grow the log past the limit, however much it writes. A tokio file
+            // finishes a write in the background; the flush waits for it, so every line is in the
+            // log once the pump has passed it (and the run ends after the pump).
+            let line = format!("{line}\n");
+            if written > LOG_LIMIT
+                || open.write_all(line.as_bytes()).await.is_err()
+                || open.flush().await.is_err()
             {
                 file = None;
             }
@@ -1165,12 +1170,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         write_script(dir.path(), &format!("{PRELUDE}items('a')\ntime.sleep(60)\n"));
         let started = StdInstant::now();
-        let events = collect(&runner(dir.path(), python, 400), "").await;
+        // The time limit covers the start of Python too: generous, so a busy machine still gets
+        // the first item out before it.
+        let events = collect(&runner(dir.path(), python, 3000), "").await;
         assert!(started.elapsed() < Duration::from_secs(20));
         assert_eq!(titles(&events), ["A"]);
         assert_eq!(
             events.last(),
-            Some(&Event::Failed(Failure::Timeout(Duration::from_millis(400))))
+            Some(&Event::Failed(Failure::Timeout(Duration::from_millis(3000))))
         );
     }
 
@@ -1338,10 +1345,25 @@ mod tests {
         shot.query("search", "one", BTreeMap::new(), CancellationToken::new())
             .collect::<Vec<_>>()
             .await;
+        assert_eq!(log_becomes(&log, "hello one\n").await, "hello one\n");
         shot.query("search", "two", BTreeMap::new(), CancellationToken::new())
             .collect::<Vec<_>>()
             .await;
-        assert_eq!(std::fs::read_to_string(log).unwrap(), "hello one\nhello two\n");
+        let expected = "hello one\nhello two\n";
+        assert_eq!(log_becomes(&log, expected).await, expected);
+    }
+
+    /// The content of `log` once it is `expected`, or what it is after ten seconds. The pump
+    /// waits only a grace period for stderr; on a busy machine the line may land a little later.
+    async fn log_becomes(log: &Path, expected: &str) -> String {
+        let started = StdInstant::now();
+        loop {
+            let content = std::fs::read_to_string(log).unwrap_or_default();
+            if content == expected || started.elapsed() > Duration::from_secs(10) {
+                return content;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
     }
 
     #[tokio::test]
@@ -1358,7 +1380,7 @@ mod tests {
         shot.query("search", "", BTreeMap::new(), CancellationToken::new())
             .collect::<Vec<_>>()
             .await;
-        assert_eq!(std::fs::read_to_string(&log).unwrap(), "fresh\n");
+        assert_eq!(log_becomes(&log, "fresh\n").await, "fresh\n");
         assert_eq!(std::fs::metadata(dir.path().join("demo.log.1")).unwrap().len(), LOG_LIMIT + 1);
     }
 

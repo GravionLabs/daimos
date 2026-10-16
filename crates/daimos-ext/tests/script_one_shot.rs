@@ -155,8 +155,19 @@ async fn stderr_lines_land_in_the_extension_log() {
     let python = python_or_skip!();
     let ext = install(python, 10_000);
     ext.batches("log").await;
-    let log = std::fs::read_to_string(ext.data_dir().join("logs").join("echo.log")).unwrap();
-    assert_eq!(log, "log line one\nlog line two\n");
+    let path = ext.data_dir().join("logs").join("echo.log");
+    let expected = "log line one\nlog line two\n";
+    // The run waits only a grace period for stderr; on a busy machine the lines land later.
+    let started = Instant::now();
+    let mut log = String::new();
+    while started.elapsed() < Duration::from_secs(10) {
+        log = std::fs::read_to_string(&path).unwrap_or_default();
+        if log == expected {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(log, expected);
 }
 
 #[tokio::test]
