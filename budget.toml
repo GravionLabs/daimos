@@ -20,3 +20,8 @@ p95_ms = 20
 [[benchmark]]
 match = "frecency_load_10k/*"
 p95_ms = 50
+
+# A warm query round trip to a long-running Python script (the session is started beforehand).
+[[benchmark]]
+match = "script_warm_round_trip/*"
+p95_ms = 30

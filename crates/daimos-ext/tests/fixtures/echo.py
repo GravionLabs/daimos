@@ -38,8 +38,18 @@ def items(request, *titles, done=False):
     )
 
 
+def conformance(request):
+    """The same answer in both modes (query texts starting with `conf`): the one-shot and the
+    long-running run of the script must give identical items."""
+    text = request["text"]
+    items(request, "conf one " + text, "conf two " + text)
+    items(request, "conf three " + text, done=True)
+
+
 def query(request):
     text = request["text"]
+    if text.startswith("conf"):
+        return conformance(request)
     if text == "exit1":
         items(request, "before-exit")
         sys.stderr.write("warming up\n")
@@ -120,6 +130,8 @@ def serve():
 
     def reply(request):
         text = request.get("text", "")
+        if text.startswith("conf"):
+            return conformance(request)
         if request["type"] == "action":
             if request["action"] == "star":
                 send({"id": request["id"], "type": "result", "toast": "Starred " + request["item"], "view": None})

@@ -26,3 +26,8 @@ workspace = true
 
 [dev-dependencies]
 tokio = { version = "1.53.2", features = ["rt-multi-thread", "sync", "time", "macros", "test-util"] }
+criterion = { version = "0.8.2", features = ["async_tokio"] }
+
+[[bench]]
+name = "script_warm"
+harness = false
