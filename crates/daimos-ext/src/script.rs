@@ -27,7 +27,7 @@ use crate::provider::Backend;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// How long the end of a process waits for its stderr to drain.
-const STDERR_GRACE: Duration = Duration::from_millis(500);
+pub(crate) const STDERR_GRACE: Duration = Duration::from_millis(500);
 
 /// A log file larger than this is moved to `<name>.log.1` before the next run appends to it.
 const LOG_LIMIT: u64 = 1024 * 1024;
@@ -90,12 +90,12 @@ enum Step {
 /// Runs the script of an extension once per request.
 #[derive(Debug, Clone)]
 pub struct OneShot {
-    extension: String,
-    dir: PathBuf,
-    command: Vec<String>,
-    timeout: Duration,
+    pub(crate) extension: String,
+    pub(crate) dir: PathBuf,
+    pub(crate) command: Vec<String>,
+    pub(crate) timeout: Duration,
     /// Where stderr is appended; `None` drops it.
-    log: Option<PathBuf>,
+    pub(crate) log: Option<PathBuf>,
 }
 
 impl OneShot {
@@ -229,7 +229,7 @@ impl OneShot {
         }
     }
 
-    fn spawn(&self) -> std::io::Result<Child> {
+    pub(crate) fn spawn(&self) -> std::io::Result<Child> {
         let mut command = Command::new(self.program());
         command
             .args(&self.command[1..])
@@ -477,7 +477,10 @@ pub fn failure_item(extension: &str, failure: &Failure) -> model::Item {
 
 /// Appends the lines of `stderr` to the log (when there is one) and returns the last non-empty
 /// line. A log that cannot be written is given up on; the run does not notice.
-async fn pump_stderr(stderr: impl AsyncRead + Unpin, log: Option<PathBuf>) -> Option<String> {
+pub(crate) async fn pump_stderr(
+    stderr: impl AsyncRead + Unpin,
+    log: Option<PathBuf>,
+) -> Option<String> {
     let mut file = match log {
         Some(path) => open_log(&path).await,
         None => None,

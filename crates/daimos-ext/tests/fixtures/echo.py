@@ -8,6 +8,7 @@ directory, so a test can see that (and whether) the process ran and whether it i
 import json
 import os
 import sys
+import threading
 import time
 
 
@@ -88,4 +89,73 @@ def main():
         action(request)
 
 
-main()
+def serve():
+    """Loop mode (`echo.py loop`): answer every line until EOF, several requests at once.
+
+    Records `start` in `starts.log`, `<id> <type>` per request in `requests.log` and
+    `<id> <cancels>` per cancel in `cancels.log`. Query texts: `slow` answers after 0.5 s unless
+    cancelled, `stubborn` answers after 0.5 s even when cancelled, `partial` sends one batch at
+    once and the rest after 0.5 s unless cancelled, `pid` answers with the process id, `die` exits
+    with code 4, `garbage` prints a line that is not JSON, `hang` never answers.
+    """
+    with open("starts.log", "a") as starts:
+        starts.write("start\n")
+    with open("pid.txt", "w") as pid:
+        pid.write(str(os.getpid()))
+    cancelled = set()
+    lock = threading.Lock()
+
+    def record(name, line):
+        with lock:
+            with open(name, "a") as log:
+                log.write(line + "\n")
+
+    def answer(request, honor_cancel):
+        """Waits up to 0.5 s; False when the request was cancelled meanwhile."""
+        for _ in range(50):
+            if honor_cancel and request["id"] in cancelled:
+                return False
+            time.sleep(0.01)
+        return not (honor_cancel and request["id"] in cancelled)
+
+    def reply(request):
+        text = request.get("text", "")
+        if request["type"] == "action":
+            if request["action"] == "star":
+                send({"id": request["id"], "type": "result", "toast": "Starred " + request["item"], "view": None})
+            return
+        if text == "slow" or text == "stubborn":
+            if answer(request, text == "slow"):
+                items(request, text + " done", done=True)
+        elif text == "partial":
+            items(request, "partial first")
+            if answer(request, True):
+                items(request, "partial last", done=True)
+        elif text == "pid":
+            items(request, str(os.getpid()), done=True)
+        elif text == "hang":
+            time.sleep(60)
+        else:
+            items(request, "echo " + text, done=True)
+
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        request = json.loads(line)
+        record("requests.log", "%s %s" % (request["id"], request["type"]))
+        if request["type"] == "cancel":
+            cancelled.add(request["cancels"])
+            record("cancels.log", "%s %s" % (request["id"], request["cancels"]))
+        elif request.get("text") == "die":
+            sys.stderr.write("dying\n")
+            sys.exit(4)
+        elif request.get("text") == "garbage":
+            print("this is not json", flush=True)
+        else:
+            threading.Thread(target=reply, args=(request,), daemon=True).start()
+
+
+if len(sys.argv) > 1 and sys.argv[1] == "loop":
+    serve()
+else:
+    main()
