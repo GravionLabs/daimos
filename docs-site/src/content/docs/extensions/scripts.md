@@ -38,7 +38,8 @@ timeout_ms = 5000
 `command` is the program and its arguments. The program starts in the extension folder, so
 `main.py` is found next to `extension.toml`. A program with a path such as `bin/run` is relative to
 the folder too. `timeout_ms` is how long one query or action may take before Daimos kills the
-process; it defaults to `5000` and must be greater than 0. See the
+process; it defaults to `5000`, must be greater than 0, and may be at most `3600000` (one
+hour). See the
 [manifest reference](../manifest/) for every field.
 
 ## What happens on a query
@@ -59,7 +60,8 @@ If you type again while a process is running, Daimos stops that process and star
 
 ## Messages
 
-Every message is one line of UTF-8 JSON. Blank lines are ignored, and so are fields Daimos does not
+Every message is one line of UTF-8 JSON, at most 4 MiB long. A longer line is an error, and
+Daimos stops the program as soon as the line passes the limit. Blank lines are ignored, and so are fields Daimos does not
 know, so an extension written today keeps working when new fields are added. Every request has an
 `id`, and the answer repeats it.
 
@@ -165,14 +167,22 @@ waiting for the old query:
 you can. Anything you still send for it is ignored, so you do not have to answer a cancel.
 
 **Time limit.** `timeout_ms` applies to every request. When the time is up, the query shows
-`<name> took too long` and Daimos kills the process; the next request starts a new one.
+`<name> took too long` and Daimos kills the process; the next request starts a new one. Other
+requests that were still open on that process show `<name> failed` with
+`restarted because another request took longer than N ms`.
 
-**Crashes.** A program that exits on its own, or writes a line that is not valid JSON, has
-crashed. The open requests show `<name> failed` with the last line from standard error, and the
+**Unread answers.** Daimos keeps at most 256 messages or 16 MiB of answers for one request that
+it has not shown yet, for example while the window is busy. A request that gets more fails with
+`sent answers faster than they were read`; the process keeps running for the other requests.
+Send fewer, larger `items` messages if you have many results.
+
+**Crashes.** A program that exits on its own, cannot be started, or writes a line that is not
+valid JSON or too long, has crashed. The open requests show `<name> failed` with the last line from standard error, and the
 next request starts the program again after a short wait that doubles with every restart: 250 ms,
 then 500 ms, then 1 s. After three restarts within a minute, the next crash stops the extension:
 every query shows `<name> keeps crashing` with the last line from standard error, and nothing is
-started any more. Editing a file of the extension (which reloads it) or restarting Daimos gives it
+started any more; the second line is the last line from standard error or, for a crash that left
+none, the error itself. Editing a file of the extension (which reloads it) or restarting Daimos gives it
 a fresh start. A process that Daimos stops itself, at the time limit, after the idle time, or on a
 reload, never counts as a crash.
 
@@ -182,7 +192,9 @@ program if it is still running half a second later. The next query starts it aga
 that takes longer than the idle time keeps the process alive.
 
 **Reload and exit.** When you edit, disable or remove the extension, Daimos stops its process; the
-next request starts the new version. When Daimos exits, it stops every long-running process.
+next request starts the new version. A request that is still open then shows `<name> failed` with
+`the extension was reloaded` or `the extension was unloaded`. When Daimos exits, it stops every
+long-running process.
 
 A long-running version of the greeter in Python:
 
@@ -218,8 +230,9 @@ the extension:
 | Windows                              | `%APPDATA%\dev.gravionlabs.daimos\logs\<name>.log`                        |
 | macOS                                | `~/Library/Application Support/dev.gravionlabs.daimos/logs/<name>.log`    |
 
-A log above 1 MiB is moved to `<name>.log.1` before the next run, replacing the older copy. If the
-log cannot be written, the query still works.
+A log above 1 MiB is moved to `<name>.log.1` before the next run, replacing the older copy. A
+standard error line longer than 64 KiB is cut there and marked `[cut]`. If the log cannot be
+written, the query still works.
 
 When something goes wrong, you see one error item below the items that already arrived:
 
@@ -229,6 +242,7 @@ When something goes wrong, you see one error item below the items that already a
 | The time is up                      | `<name> took too long`        | `timed out after 5 s`                                    |
 | The program cannot be started       | `<name> failed`               | `cannot start <program>: ...`                            |
 | A line is not valid JSON            | `<name> failed`               | The line, shortened to 200 characters                    |
+| A line is longer than 4 MiB         | `<name> failed`               | `wrote a line longer than 4 MiB`                         |
 | A long-running program crashed too often | `<name> keeps crashing`  | The last non-empty line it wrote to standard error, or `restarted too often, stopped` |
 
 Exit with code 0 when everything is fine, and with another code after printing the reason to

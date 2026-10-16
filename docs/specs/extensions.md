@@ -90,9 +90,11 @@ stdout. stderr goes to the extension log. Every request carries an `id`; the res
   loaded. Queries are not debounced. Requests get increasing ids from one counter; several can be
   in flight and the answers are routed by id, so they may interleave. Cancels let it drop stale
   work, and late answers for a cancelled id are ignored. Custom actions use the same process. The
-  daimos restarts it on crash with a backoff (250 ms, doubling) and gives up after three restarts
-  within a minute until the extension is reloaded; it stops the process after `idle_timeout_ms`
-  without a request, and on unload, reload and exit.
+  daimos restarts it on crash (exit, failed start, invalid or over-long line) with a backoff
+  (250 ms, doubling) and gives up after three restarts within a minute until the extension is
+  reloaded; it stops the process after `idle_timeout_ms` without a request, and on unload, reload
+  and exit. Every stdout line is at most 4 MiB, and a request may hold at most 256 unread messages
+  (16 MiB); beyond that the process or the request fails instead of buffering.
 - Built-in action kinds (`open`, `copy`, `paste`, `run`) are executed by the daimos, so a script
   never has to touch the clipboard or the shell itself.
 

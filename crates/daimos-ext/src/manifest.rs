@@ -85,6 +85,9 @@ fn default_idle_timeout_ms() -> u64 {
 /// The default of `timeout_ms`.
 pub const DEFAULT_TIMEOUT_MS: u64 = 5000;
 
+/// The largest `timeout_ms`: one hour.
+pub const MAX_TIMEOUT_MS: u64 = 3_600_000;
+
 fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
 }
@@ -325,6 +328,14 @@ impl Manifest {
             return Err(fail(
                 vec![key("runtime"), key("script"), key("timeout_ms")],
                 "must be greater than 0".into(),
+            ));
+        }
+        if let Some(script) = &self.runtime.script
+            && script.timeout_ms > MAX_TIMEOUT_MS
+        {
+            return Err(fail(
+                vec![key("runtime"), key("script"), key("timeout_ms")],
+                format!("must be at most {MAX_TIMEOUT_MS} (one hour)"),
             ));
         }
         if let Some(script) = &self.runtime.script
@@ -646,6 +657,27 @@ required = true
         let error =
             rejects("long_running = true", "timeout_ms = 0", 15, "runtime.script.timeout_ms");
         assert!(error.message.contains("greater than 0"), "{error}");
+    }
+
+    #[test]
+    fn a_timeout_above_one_hour_is_rejected_and_one_hour_is_accepted() {
+        let error = rejects(
+            "long_running = true",
+            &format!("timeout_ms = {}", MAX_TIMEOUT_MS + 1),
+            15,
+            "runtime.script.timeout_ms",
+        );
+        assert!(error.message.contains("at most 3600000"), "{error}");
+        let error = rejects(
+            "long_running = true",
+            &format!("timeout_ms = {}", u64::MAX),
+            15,
+            "runtime.script.timeout_ms",
+        );
+        assert!(error.message.contains("at most"), "{error}");
+        let manifest =
+            parse(&SCRIPT.replace("long_running = true", "timeout_ms = 3600000")).unwrap();
+        assert_eq!(manifest.runtime.script.unwrap().timeout_ms, MAX_TIMEOUT_MS);
     }
 
     #[test]

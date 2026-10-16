@@ -2,9 +2,11 @@
 //! `Session`, and through the `ScriptBackend` of an extension host and the query engine. The tests
 //! skip when there is no Python.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use daimos_core::QueryEngine;
@@ -19,29 +21,6 @@ use futures::StreamExt;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-
-fn python() -> Option<&'static str> {
-    static PYTHON: OnceLock<Option<&'static str>> = OnceLock::new();
-    *PYTHON.get_or_init(|| {
-        let candidates: &[&str] =
-            if cfg!(windows) { &["python", "py", "python3"] } else { &["python3", "python"] };
-        candidates.iter().copied().find(|name| {
-            Command::new(name).arg("--version").output().is_ok_and(|out| out.status.success())
-        })
-    })
-}
-
-macro_rules! python_or_skip {
-    () => {
-        match python() {
-            Some(python) => python,
-            None => {
-                eprintln!("skipped: no python3 or python on PATH");
-                return;
-            }
-        }
-    };
-}
 
 struct Fixture {
     root: tempfile::TempDir,
@@ -82,11 +61,16 @@ fn install(python: &str, timeout_ms: u64) -> Fixture {
 }
 
 fn install_idle(python: &str, timeout_ms: u64, idle_timeout_ms: u64) -> Fixture {
+    install_mode(python, timeout_ms, idle_timeout_ms, "loop")
+}
+
+/// `mode` is `loop`, or `loop-stubborn` for a script that keeps running after its input ends.
+fn install_mode(python: &str, timeout_ms: u64, idle_timeout_ms: u64, mode: &str) -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/echo.py");
     std::fs::copy(fixture, root.path().join("echo.py")).unwrap();
     let runtime = ScriptRuntime {
-        command: vec![python.to_owned(), "echo.py".to_owned(), "loop".to_owned()],
+        command: vec![python.to_owned(), "echo.py".to_owned(), mode.to_owned()],
         long_running: true,
         timeout_ms,
         idle_timeout_ms,
@@ -117,14 +101,31 @@ async fn eventually(mut check: impl FnMut() -> bool) -> bool {
     false
 }
 
-/// Whether `pid` still has a process table entry; a zombie counts. Only checked on Unix.
+/// Whether `pid` still has a process table entry (a zombie counts on Unix).
 fn process_exists(pid: &str) -> bool {
-    cfg!(unix)
-        && Command::new("kill")
+    if cfg!(windows) {
+        let filter = format!("PID eq {pid}");
+        Command::new("tasklist")
+            .args(["/FI", &filter, "/NH", "/FO", "CSV"])
+            .stderr(Stdio::null())
+            .output()
+            .is_ok_and(|out| String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\"")))
+    } else {
+        Command::new("kill")
             .args(["-0", pid])
             .stderr(Stdio::null())
             .status()
             .is_ok_and(|status| status.success())
+    }
+}
+
+/// Waits until the script has logged `count` requests.
+async fn requests_seen(ext: &Fixture, count: usize) {
+    assert!(
+        eventually(|| ext.request_ids().len() >= count).await,
+        "the script saw {:?}",
+        ext.request_ids()
+    );
 }
 
 #[tokio::test]
@@ -166,7 +167,7 @@ async fn interleaved_responses_reach_the_query_with_their_id() {
     let slow = ext.session.query("search", "slow", Default::default(), CancellationToken::new());
     let fast = ext.session.query("search", "fast", Default::default(), CancellationToken::new());
     let slow = tokio::spawn(slow.collect::<Vec<_>>());
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    requests_seen(&ext, 1).await;
     let fast = tokio::spawn(fast.collect::<Vec<_>>());
     let (slow, fast) = (slow.await.unwrap(), fast.await.unwrap());
     assert_eq!(titles(&fast), ["echo fast"]);
@@ -200,7 +201,7 @@ async fn late_answers_for_a_cancelled_query_are_dropped() {
     let cancel = CancellationToken::new();
     let stubborn = ext.session.query("search", "stubborn", Default::default(), cancel.clone());
     let stubborn = tokio::spawn(stubborn.collect::<Vec<_>>());
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    requests_seen(&ext, 1).await;
     cancel.cancel();
     assert!(stubborn.await.unwrap().is_empty());
     assert!(eventually(|| ext.read("cancels.log") == "2 1\n").await);
@@ -276,7 +277,7 @@ async fn a_failure_reaches_every_request_waiting_on_the_process() {
     let ext = install(python, 10_000);
     let waiting = ext.session.query("search", "slow", Default::default(), CancellationToken::new());
     let waiting = tokio::spawn(waiting.collect::<Vec<_>>());
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    requests_seen(&ext, 1).await;
     let dying = ext.ask("die").await;
     assert!(matches!(dying.as_slice(), [Event::Failed(Failure::Exit { code: Some(4), .. })]));
     let waiting = waiting.await.unwrap();
@@ -440,24 +441,28 @@ async fn an_idle_stop_is_not_a_crash() {
         wait_until_gone(&ext.pid()).await;
     }
     assert!(!ext.session.is_failed());
-    // No backoff either: the sixth start is not delayed.
-    let started = Instant::now();
     assert_eq!(titles(&ext.ask("last").await), ["echo last"]);
-    assert!(started.elapsed() < Duration::from_millis(200), "{:?}", started.elapsed());
     assert_eq!(ext.starts(), 6);
+    // Had the five stops counted, the first crash now would fail the session; three restarts
+    // within the minute are still allowed.
+    for _ in 0..3 {
+        crash(&ext).await;
+        assert_eq!(titles(&ext.ask("alive").await), ["echo alive"]);
+    }
+    assert!(!ext.session.is_failed());
 }
 
 #[tokio::test]
 async fn a_query_resets_the_idle_time() {
     let python = python_or_skip!();
-    let ext = install_idle(python, 10_000, 1500);
+    let ext = install_idle(python, 10_000, 2000);
     ext.ask("a").await;
     let pid = ext.pid();
-    for _ in 0..4 {
-        tokio::time::sleep(Duration::from_millis(600)).await;
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(titles(&ext.ask("again").await), ["echo again"]);
     }
-    // 2.4 s since the start, more than the idle time, but never idle for 1.5 s.
+    // 2.5 s since the start, more than the idle time, but never idle for more than about 0.5 s.
     assert!(process_exists(&pid));
     assert_eq!(ext.starts(), 1);
     wait_until_gone(&pid).await;
@@ -677,4 +682,234 @@ async fn a_long_running_extension_answers_through_the_query_engine() {
     let outcome = engine.run_action("echo again", "star").unwrap().unwrap();
     assert_eq!(outcome.toast.as_deref(), Some("Starred echo again"));
     assert_eq!(ext.starts(), 1);
+}
+
+// Limits: line length, unread answers, timeouts, and stops while requests wait or arrive.
+
+#[tokio::test]
+async fn a_line_longer_than_the_limit_fails_the_request_and_kills_the_process() {
+    let python = python_or_skip!();
+    let ext = install(python, 10_000);
+    let events = ext.ask("huge").await;
+    let [Event::Failed(Failure::Protocol(message))] = events.as_slice() else {
+        panic!("{events:?}")
+    };
+    assert!(message.contains("longer than 4 MiB"), "{message}");
+    let pid = ext.pid();
+    wait_until_gone(&pid).await;
+    assert_eq!(titles(&ext.ask("after").await), ["echo after"]);
+    assert_eq!(ext.starts(), 2);
+}
+
+#[tokio::test]
+async fn a_long_line_while_no_request_waits_still_kills_the_process() {
+    let python = python_or_skip!();
+    let ext = install(python, 10_000);
+    assert_eq!(titles(&ext.ask("huge-later").await), ["echo huge-later"]);
+    let pid = ext.pid();
+    // Nothing is in flight now; the line is still not buffered without end.
+    wait_until_gone(&pid).await;
+    assert!(!ext.session.is_running());
+    assert_eq!(titles(&ext.ask("after").await), ["echo after"]);
+    assert_eq!(ext.starts(), 2);
+}
+
+#[tokio::test]
+async fn a_request_that_does_not_read_its_answers_fails_instead_of_buffering_them() {
+    let python = python_or_skip!();
+    let ext = install(python, 10_000);
+    let mut events =
+        ext.session.query("search", "flood", Default::default(), CancellationToken::new());
+    assert!(matches!(events.next().await, Some(Event::Items(_))));
+    // The script sends all of it while nobody reads.
+    assert!(eventually(|| ext.read("flooded.log") == "done\n").await);
+    let rest: Vec<_> = events.collect().await;
+    assert!(rest.len() < 2000, "{} events were kept", rest.len());
+    let Some(Event::Failed(Failure::Dropped(message))) = rest.last() else {
+        panic!("{:?}", rest.last())
+    };
+    assert!(message.contains("faster than they were read"), "{message}");
+    // Only that request failed: the process serves the next one.
+    assert_eq!(titles(&ext.ask("next").await), ["echo next"]);
+    assert_eq!(ext.starts(), 1);
+}
+
+#[tokio::test]
+async fn a_timeout_tells_the_other_waiting_requests_why_the_process_went_away() {
+    let python = python_or_skip!();
+    let ext = install(python, 1000);
+    let first = ext.session.query("search", "hang", Default::default(), CancellationToken::new());
+    let first = tokio::spawn(first.collect::<Vec<_>>());
+    requests_seen(&ext, 1).await;
+    // Far enough behind that the first request times out well before this one.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let second = ext.session.query("search", "hang", Default::default(), CancellationToken::new());
+    let second = tokio::spawn(second.collect::<Vec<_>>());
+    let first = first.await.unwrap();
+    assert_eq!(first, [Event::Failed(Failure::Timeout(Duration::from_millis(1000)))]);
+    let second = second.await.unwrap();
+    let [Event::Failed(Failure::Interrupted(message))] = second.as_slice() else {
+        panic!("{second:?}")
+    };
+    assert_eq!(message, "restarted because another request took longer than 1000 ms");
+}
+
+#[tokio::test]
+async fn a_huge_timeout_does_not_overflow_the_deadline() {
+    let python = python_or_skip!();
+    // The manifest refuses this; a runtime built by hand must not panic either.
+    let ext = install(python, u64::MAX);
+    assert_eq!(titles(&ext.ask("a").await), ["echo a"]);
+}
+
+#[tokio::test]
+async fn protocol_crashes_fail_the_session_with_the_protocol_message() {
+    let python = python_or_skip!();
+    let ext = install(python, 10_000);
+    for _ in 0..3 {
+        assert!(matches!(
+            ext.ask("garbage").await.as_slice(),
+            [Event::Failed(Failure::Protocol(_))]
+        ));
+        assert_eq!(titles(&ext.ask("alive").await), ["echo alive"]);
+    }
+    assert!(matches!(ext.ask("garbage").await.as_slice(), [Event::Failed(Failure::Protocol(_))]));
+    let events = ext.ask("alive").await;
+    let [Event::Failed(failure @ Failure::KeepsCrashing { stderr: Some(line) })] =
+        events.as_slice()
+    else {
+        panic!("{events:?}")
+    };
+    assert!(line.contains("this is not json"), "{line}");
+    assert_eq!(failure.message(), *line);
+}
+
+#[tokio::test]
+async fn a_program_that_cannot_start_counts_as_a_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    let runtime = ScriptRuntime {
+        command: vec!["daimos-no-such-program".into()],
+        long_running: true,
+        timeout_ms: 5000,
+        idle_timeout_ms: DEFAULT_IDLE_TIMEOUT_MS,
+    };
+    let session = Session::new("echo", PathBuf::from(dir.path()), &runtime);
+    let ask = || async {
+        session.query("search", "x", Default::default(), CancellationToken::new()).collect().await
+    };
+    let started = Instant::now();
+    for _ in 0..4 {
+        let events: Vec<Event> = ask().await;
+        assert!(matches!(events.as_slice(), [Event::Failed(Failure::Spawn(_))]), "{events:?}");
+    }
+    // Backoff between the starts: 250 ms + 500 ms + 1 s.
+    assert!(started.elapsed() >= Duration::from_millis(1750), "{:?}", started.elapsed());
+    let events: Vec<Event> = ask().await;
+    let [Event::Failed(Failure::KeepsCrashing { stderr: Some(line) })] = events.as_slice() else {
+        panic!("{events:?}")
+    };
+    assert!(line.contains("cannot start daimos-no-such-program"), "{line}");
+    assert!(session.is_failed());
+}
+
+#[tokio::test]
+async fn a_query_cancelled_during_the_backoff_sends_nothing_and_starts_nothing() {
+    let python = python_or_skip!();
+    let ext = install(python, 10_000);
+    crash(&ext).await;
+    let cancel = CancellationToken::new();
+    let stream = ext.session.query("search", "late", Default::default(), cancel.clone());
+    let pending = tokio::spawn(stream.collect::<Vec<_>>());
+    // Well inside the 250 ms backoff.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    cancel.cancel();
+    assert!(pending.await.unwrap().is_empty());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(ext.starts(), 1, "the cancelled query must not start the process");
+    assert_eq!(titles(&ext.ask("next").await), ["echo next"]);
+    assert_eq!(ext.starts(), 2);
+    assert!(!ext.read("requests.log").contains("late"));
+}
+
+#[tokio::test]
+async fn a_process_that_ignores_the_end_of_its_input_is_killed_after_the_idle_grace() {
+    let python = python_or_skip!();
+    let ext = install_mode(python, 10_000, 300, "loop-stubborn");
+    assert_eq!(titles(&ext.ask("a").await), ["echo a"]);
+    let pid = ext.pid();
+    assert!(eventually(|| ext.read("eof.log") == "eof\n").await, "stdin was never closed");
+    // It would sleep for a minute; the idle stop kills it after the grace instead.
+    wait_until_gone(&pid).await;
+    assert!(!ext.session.is_failed());
+    assert_eq!(titles(&ext.ask("b").await), ["echo b"]);
+    assert_ne!(ext.pid(), pid);
+    assert_eq!(ext.starts(), 2);
+}
+
+#[tokio::test]
+async fn a_request_during_an_idle_stop_waits_for_it_and_gets_a_new_process() {
+    let python = python_or_skip!();
+    let ext = install_mode(python, 10_000, 300, "loop-stubborn");
+    assert_eq!(titles(&ext.ask("a").await), ["echo a"]);
+    let pid = ext.pid();
+    // Its input is closed, the process lingers for the 500 ms grace: ask right now.
+    assert!(eventually(|| ext.read("eof.log") == "eof\n").await);
+    assert_eq!(titles(&ext.ask("during").await), ["echo during"]);
+    assert!(!process_exists(&pid), "the old process {pid} is still there");
+    assert_ne!(ext.pid(), pid);
+    assert_eq!(ext.starts(), 2);
+    assert!(!ext.session.is_failed());
+}
+
+impl Hosted {
+    /// Starts a query of the `search` command in a task of its own; returns its batches.
+    fn ask_later(&self, text: &str) -> tokio::task::JoinHandle<Vec<daimos_core::model::ItemBatch>> {
+        let providers = self.registry.providers();
+        let ctx = QueryContext {
+            text: text.into(),
+            keyword_routed: true,
+            cancel: CancellationToken::new(),
+        };
+        tokio::spawn(providers[0].query(ctx).collect())
+    }
+
+    async fn requests(&self, count: usize) {
+        let seen = || self.read("requests.log").lines().count() >= count;
+        assert!(eventually(seen).await, "{}", self.read("requests.log"));
+    }
+}
+
+#[tokio::test]
+async fn a_reload_tells_the_waiting_request_that_the_extension_was_reloaded() {
+    let python = python_or_skip!();
+    let ext = host(python);
+    let waiting = ext.ask_later("hang");
+    ext.requests(1).await;
+    ext.host.reload("echo");
+    let batches = waiting.await.unwrap();
+    let items: Vec<_> = batches.into_iter().flat_map(|b| b.items).collect();
+    let [item] = items.as_slice() else { panic!("{items:?}") };
+    assert_eq!(item.title, "echo failed");
+    assert_eq!(item.subtitle.as_deref(), Some("the extension was reloaded"));
+    assert_eq!(ext.ask("after").await, ["echo after"]);
+}
+
+#[tokio::test]
+async fn a_backend_query_that_is_not_read_fails_instead_of_buffering() {
+    let python = python_or_skip!();
+    let ext = host(python);
+    let providers = ext.registry.providers();
+    let ctx = QueryContext {
+        text: "flood".into(),
+        keyword_routed: true,
+        cancel: CancellationToken::new(),
+    };
+    let mut batches = providers[0].query(ctx);
+    assert!(batches.next().await.is_some());
+    assert!(eventually(|| ext.read("flooded.log") == "done\n").await);
+    let rest: Vec<_> = batches.collect().await;
+    let last = rest.last().unwrap();
+    assert_eq!(last.items[0].title, "echo failed");
+    assert!(last.items[0].subtitle.as_deref().unwrap().contains("faster than they were read"));
+    assert!(rest.len() < 2000);
 }

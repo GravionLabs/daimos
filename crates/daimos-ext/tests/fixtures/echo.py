@@ -99,8 +99,23 @@ def main():
         action(request)
 
 
-def serve():
+HUGE = 5 * 1024 * 1024  # more than the 4 MiB a line may have
+
+
+def huge_line():
+    """Writes more than a line may hold, without a newline, and keeps the pipe open."""
+    sys.stdout.write("x" * HUGE)
+    sys.stdout.flush()
+    time.sleep(60)
+
+
+def serve(ignore_eof=False):
     """Loop mode (`echo.py loop`): answer every line until EOF, several requests at once.
+
+    `echo.py loop-stubborn` records `eof` in `eof.log` at the end of the input and then keeps
+    running for a minute instead of exiting. More query texts: `huge` writes a line longer than
+    the limit, `huge-later` answers and then writes such a line while no request waits, `flood`
+    sends 2000 batches at once before `done` and then records `done` in `flooded.log`.
 
     Records `start` in `starts.log`, `<id> <type>` per request in `requests.log` and
     `<id> <cancels>` per cancel in `cancels.log`. Query texts: `slow` answers after 0.5 s unless
@@ -147,6 +162,17 @@ def serve():
             items(request, str(os.getpid()), done=True)
         elif text == "hang":
             time.sleep(60)
+        elif text == "huge":
+            huge_line()
+        elif text == "huge-later":
+            items(request, "echo huge-later", done=True)
+            time.sleep(0.2)
+            huge_line()
+        elif text == "flood":
+            for n in range(2000):
+                items(request, "flood %d" % n)
+            items(request, "flood end", done=True)
+            record("flooded.log", "done")
         else:
             items(request, "echo " + text, done=True)
 
@@ -165,9 +191,14 @@ def serve():
             print("this is not json", flush=True)
         else:
             threading.Thread(target=reply, args=(request,), daemon=True).start()
+    if ignore_eof:
+        record("eof.log", "eof")
+        time.sleep(60)
 
 
 if len(sys.argv) > 1 and sys.argv[1] == "loop":
     serve()
+elif len(sys.argv) > 1 and sys.argv[1] == "loop-stubborn":
+    serve(ignore_eof=True)
 else:
     main()

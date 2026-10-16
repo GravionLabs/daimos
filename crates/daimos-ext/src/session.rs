@@ -13,25 +13,33 @@
 //! A process that has had no request in flight for `idle_timeout` is stopped: stdin is closed so
 //! it can exit, and it is killed if it has not after a short grace. The next request starts a
 //! fresh one through the normal lazy start.
+//!
+//! Memory stays bounded whatever the script does: a stdout line longer than [`MAX_LINE`] is a
+//! crash (the process is killed as soon as the line passes the limit, request or not), a request
+//! with more than 256 unread answers fails with [`Failure::Dropped`], and request lines
+//! for a script that does not read its input are capped too.
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use daimos_core::model;
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
-use tokio::io::{AsyncWriteExt, BufReader};
-use tokio::process::Child;
+use tokio::io::AsyncWriteExt;
+use tokio::process::{Child, ChildStdout};
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
 use crate::manifest::ScriptRuntime;
 use crate::protocol::{self, Request, Response};
-use crate::script::{Event, Failure, OneShot, STDERR_GRACE, pump_stderr};
+use crate::script::{
+    Event, Failure, Line, LineReader, MAX_LINE, OneShot, STDERR_GRACE, deadline_after,
+    line_too_long, pump_stderr, utf8_line,
+};
 
 /// The first restart waits this long; every further restart within the window doubles it.
 const BACKOFF: Duration = Duration::from_millis(250);
@@ -43,12 +51,20 @@ const WINDOW: Duration = Duration::from_secs(60);
 const IDLE_GRACE: Duration = Duration::from_millis(500);
 /// Longest idle timeout honored; keeps the deadline arithmetic far from overflow.
 const MAX_IDLE: Duration = Duration::from_secs(365 * 24 * 3600);
+/// Answers of one request that may wait unread; one more fails the request.
+const MAX_PENDING: usize = 256;
+/// Bytes of answers of one request that may wait unread; more fail the request.
+const MAX_PENDING_BYTES: usize = 16 * 1024 * 1024;
+/// Request lines that may wait for a script that does not read its input.
+const MAX_OUTGOING: usize = 64;
 
 /// What the idle watcher needs to know about a process.
 struct Activity {
     state: Mutex<ActivityState>,
     /// Set (before `exited` fires) when the process ended without being asked to: when and why.
     crash: Mutex<Option<(Instant, Failure)>>,
+    /// Why the session killed the process; what the requests still waiting are told.
+    reason: Mutex<Option<Failure>>,
 }
 
 struct ActivityState {
@@ -69,6 +85,7 @@ impl Activity {
                 stopping: false,
             }),
             crash: Mutex::new(None),
+            reason: Mutex::new(None),
         }
     }
 
@@ -169,9 +186,27 @@ enum Step {
     Failed(Failure),
 }
 
+/// The end of a request that the channel cannot carry: set before its sender is dropped.
+type Fate = Arc<Mutex<Option<Failure>>>;
+
+/// The process side of one waiting request.
+struct Waiter {
+    answers: mpsc::Sender<(Response, usize)>,
+    /// Bytes sent and not yet read by the request.
+    pending: Arc<AtomicUsize>,
+    fate: Fate,
+}
+
 /// The waiting requests by id; `None` once the process has ended, so a late registration fails
 /// instead of waiting for an answer that cannot come.
-type Waiting = Mutex<Option<HashMap<u64, mpsc::UnboundedSender<Step>>>>;
+type Waiting = Mutex<Option<HashMap<u64, Waiter>>>;
+
+/// The request side of a registration.
+struct Registration {
+    answers: mpsc::Receiver<(Response, usize)>,
+    pending: Arc<AtomicUsize>,
+    fate: Fate,
+}
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
@@ -179,7 +214,7 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 
 /// One running child process with its reader and writer tasks.
 struct Process {
-    lines: mpsc::UnboundedSender<String>,
+    lines: mpsc::Sender<String>,
     waiting: Arc<Waiting>,
     /// Asks the supervisor to kill the child.
     kill: CancellationToken,
@@ -201,7 +236,7 @@ impl Process {
         let log = spec.log.clone();
         let stderr = child.stderr.take().map(|stderr| tokio::spawn(pump_stderr(stderr, log)));
         let waiting: Arc<Waiting> = Arc::new(Mutex::new(Some(HashMap::new())));
-        let (lines, mut outgoing) = mpsc::unbounded_channel::<String>();
+        let (lines, mut outgoing) = mpsc::channel::<String>(MAX_OUTGOING);
         let kill = CancellationToken::new();
         let exited = CancellationToken::new();
         let activity = Arc::new(Activity::new());
@@ -227,7 +262,7 @@ impl Process {
 
         tokio::spawn(supervise(
             child,
-            tokio::io::AsyncBufReadExt::lines(BufReader::new(stdout)),
+            LineReader::new(stdout, MAX_LINE),
             stderr,
             Arc::clone(&waiting),
             kill.clone(),
@@ -244,16 +279,19 @@ impl Process {
         Ok(Arc::new(Self { lines, waiting, kill, exited, activity }))
     }
 
-    /// Registers request `id`; `None` when the process has already ended.
-    fn register(&self, id: u64) -> Option<mpsc::UnboundedReceiver<Step>> {
-        let (tx, rx) = mpsc::unbounded_channel();
+    /// Registers request `id`; `None` when the process has ended or is being stopped.
+    fn register(&self, id: u64) -> Option<Registration> {
+        let (tx, rx) = mpsc::channel(MAX_PENDING);
+        let pending = Arc::new(AtomicUsize::new(0));
+        let fate: Fate = Arc::default();
         let mut waiting = lock(&self.waiting);
         let map = waiting.as_mut()?;
         if !self.activity.enter() {
             return None;
         }
-        map.insert(id, tx);
-        Some(rx)
+        let waiter = Waiter { answers: tx, pending: Arc::clone(&pending), fate: Arc::clone(&fate) };
+        map.insert(id, waiter);
+        Some(Registration { answers: rx, pending, fate })
     }
 
     fn deregister(&self, id: u64) {
@@ -264,13 +302,19 @@ impl Process {
         }
     }
 
-    /// Queues a request line; a process that is gone ignores it.
-    fn send(&self, request: &Request) {
-        let _ = self.lines.send(protocol::encode_line(request));
+    /// Queues a request line; `false` when the script has not read the lines before it. A process
+    /// that is gone ignores it.
+    fn send(&self, request: &Request) -> bool {
+        match self.lines.try_send(protocol::encode_line(request)) {
+            Ok(()) | Err(mpsc::error::TrySendError::Closed(_)) => true,
+            Err(mpsc::error::TrySendError::Full(_)) => false,
+        }
     }
 
-    /// Kills the child and waits until it is reaped.
-    async fn kill_and_wait(&self) {
+    /// Kills the child and waits until it is reaped; the requests still waiting fail with
+    /// `reason`.
+    async fn stop(&self, reason: Failure) {
+        lock(&self.activity.reason).get_or_insert(reason);
         self.kill.cancel();
         self.exited.cancelled().await;
     }
@@ -286,7 +330,7 @@ impl Drop for Process {
 /// still waits and reaps it.
 async fn supervise(
     mut child: Child,
-    mut lines: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    mut lines: LineReader<ChildStdout>,
     mut stderr: Option<tokio::task::JoinHandle<Option<String>>>,
     waiting: Arc<Waiting>,
     kill: CancellationToken,
@@ -300,18 +344,31 @@ async fn supervise(
             () = kill.cancelled() => {
                 deliberate = true;
                 let _ = child.kill().await;
-                break Failure::Exit { code: None, stderr: None };
+                let reason = lock(&activity.reason).take();
+                break reason.unwrap_or(Failure::Exit { code: None, stderr: None });
             }
             line = lines.next_line() => match line {
-                Ok(Some(line)) => match protocol::parse_line::<Response>(&line) {
-                    Ok(None) => {}
-                    Ok(Some(response)) => route(&waiting, response),
-                    Err(error) => {
-                        let _ = child.kill().await;
-                        break Failure::Protocol(error.to_string());
+                Ok(Line::Text(line)) => {
+                    let size = line.len();
+                    let parsed = utf8_line(line).and_then(|line| {
+                        protocol::parse_line::<Response>(&line)
+                            .map_err(|error| Failure::Protocol(error.to_string()))
+                    });
+                    match parsed {
+                        Ok(None) => {}
+                        Ok(Some(response)) => route(&waiting, &activity, response, size),
+                        Err(failure) => {
+                            let _ = child.kill().await;
+                            break failure;
+                        }
                     }
-                },
-                Ok(None) => {
+                }
+                Ok(Line::TooLong(_)) => {
+                    // Killed at once, waiting request or not: the line is never buffered whole.
+                    let _ = child.kill().await;
+                    break line_too_long();
+                }
+                Ok(Line::End) => {
                     // Output closed: the process is ending; do not wait for it forever.
                     let status = match tokio::time::timeout(STDERR_GRACE, child.wait()).await {
                         Ok(status) => status.ok(),
@@ -340,17 +397,29 @@ async fn supervise(
     }
     kill.cancel();
     let waiters = lock(&waiting).take().unwrap_or_default();
-    for sender in waiters.into_values() {
-        let _ = sender.send(Step::Failed(failure.clone()));
+    for waiter in waiters.into_values() {
+        // The answers already sent are read first; the failure comes when they run out.
+        *lock(&waiter.fate) = Some(failure.clone());
     }
     exited.cancel();
 }
 
-/// Hands a response to the request it answers; an id nobody waits for (cancelled, finished or
-/// made up) is dropped.
-fn route(waiting: &Waiting, response: Response) {
-    if let Some(sender) = lock(waiting).as_ref().and_then(|map| map.get(&response.id())) {
-        let _ = sender.send(Step::Message(response));
+/// Hands a response of `size` bytes to the request it answers; an id nobody waits for
+/// (cancelled, finished or made up) is dropped. A request with too much unread fails.
+fn route(waiting: &Waiting, activity: &Activity, response: Response, size: usize) {
+    let id = response.id();
+    let mut waiting = lock(waiting);
+    let Some(map) = waiting.as_mut() else { return };
+    let Some(waiter) = map.get(&id) else { return };
+    let pending = waiter.pending.fetch_add(size, Ordering::SeqCst) + size;
+    let delivered =
+        pending <= MAX_PENDING_BYTES && waiter.answers.try_send((response, size)).is_ok();
+    if !delivered && let Some(waiter) = map.remove(&id) {
+        *lock(&waiter.fate) = Some(Failure::Dropped(format!(
+            "sent answers faster than they were read (more than {MAX_PENDING} messages or {} MiB)",
+            MAX_PENDING_BYTES / (1024 * 1024)
+        )));
+        activity.leave();
     }
 }
 
@@ -416,9 +485,15 @@ impl Session {
 
     /// Kills the process (if any) and waits until it is reaped. The next request starts a new one.
     pub async fn shutdown(&self) {
+        self.stop("the extension was stopped").await;
+    }
+
+    /// Like [`shutdown`](Self::shutdown); the requests still waiting fail with
+    /// [`Failure::Interrupted`] carrying `reason`.
+    pub async fn stop(&self, reason: &str) {
         let process = lock(&self.inner.process).take();
         if let Some(process) = process {
-            process.kill_and_wait().await;
+            process.stop(Failure::Interrupted(reason.to_owned())).await;
         }
     }
 
@@ -458,11 +533,17 @@ impl Session {
                 }
                 match health.ready_at.filter(|&t| t > Instant::now()) {
                     Some(at) => at,
-                    None => {
-                        let process = Process::start(&self.inner.spec)?;
-                        *slot = Some(Arc::clone(&process));
-                        return Ok(process);
-                    }
+                    None => match Process::start(&self.inner.spec) {
+                        Ok(process) => {
+                            *slot = Some(Arc::clone(&process));
+                            return Ok(process);
+                        }
+                        Err(failure) => {
+                            // A start that fails counts like a crash: backoff, then the limit.
+                            health.crashed(Instant::now(), Some(failure.message()));
+                            return Err(failure);
+                        }
+                    },
                 }
             };
             tokio::time::sleep_until(wait_until).await;
@@ -470,32 +551,50 @@ impl Session {
     }
 
     /// Sends the request built by `build` (given its fresh id) and returns the call that waits for
-    /// the answer. `stop` says which response ends it.
+    /// the answer. `stop` says which response ends it. `Ok(None)` when `cancel` fired first: then
+    /// nothing was sent.
     async fn begin(
         &self,
         build: impl Fn(u64) -> Request,
         cancel: CancellationToken,
         stop: fn(&Response) -> bool,
-    ) -> Result<Call, Failure> {
-        // A process that ended between the lookup and the registration is replaced once.
-        for _ in 0..2 {
-            let process = self.process().await?;
+    ) -> Result<Option<Call>, Failure> {
+        // A process that ends (or is being stopped) between the lookup and the registration is
+        // waited out and replaced; a few times at most.
+        for _ in 0..3 {
+            let process = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Ok(None),
+                process = self.process() => process?,
+            };
             let id = self.inner.next_id();
-            if let Some(answers) = process.register(id) {
-                process.send(&build(id));
-                return Ok(Call {
-                    inner: Arc::clone(&self.inner),
-                    process,
-                    id,
-                    answers,
-                    deadline: Instant::now() + self.inner.spec.timeout,
-                    cancel,
-                    stop,
-                    finished: false,
-                });
+            let Some(registration) = process.register(id) else {
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => return Ok(None),
+                    () = process.exited.cancelled() => continue,
+                }
+            };
+            let call = Call {
+                inner: Arc::clone(&self.inner),
+                process,
+                id,
+                answers: registration.answers,
+                pending: registration.pending,
+                fate: registration.fate,
+                deadline: deadline_after(self.inner.spec.timeout),
+                cancel,
+                stop,
+                finished: false,
+            };
+            if !call.process.send(&build(id)) {
+                let mut call = call;
+                call.finish();
+                return Err(Failure::Dropped("does not read its input".to_owned()));
             }
+            return Ok(Some(call));
         }
-        Err(Failure::Exit { code: None, stderr: None })
+        Err(Failure::Interrupted("the process kept ending before it took the request".to_owned()))
     }
 
     /// Streams the items a query answers. The process starts when the stream is first polled (if
@@ -538,7 +637,8 @@ impl Session {
                     )
                     .await;
                 match begun {
-                    Ok(call) => state.call = Some(call),
+                    Ok(Some(call)) => state.call = Some(call),
+                    Ok(None) => return None,
                     Err(failure) => return Some((Event::Failed(failure), state)),
                 }
             }
@@ -569,7 +669,7 @@ impl Session {
         if cancel.is_cancelled() {
             return Ok(None);
         }
-        let mut call = self
+        let Some(mut call) = self
             .begin(
                 |id| Request::Action {
                     id,
@@ -580,7 +680,10 @@ impl Session {
                 cancel,
                 |response| matches!(response, Response::Result { .. }),
             )
-            .await?;
+            .await?
+        else {
+            return Ok(None);
+        };
         let mut toast = None;
         while let Some(step) = call.next().await {
             match step {
@@ -598,7 +701,11 @@ struct Call {
     inner: Arc<Inner>,
     process: Arc<Process>,
     id: u64,
-    answers: mpsc::UnboundedReceiver<Step>,
+    answers: mpsc::Receiver<(Response, usize)>,
+    /// Bytes of answers not yet read; shared with the router.
+    pending: Arc<AtomicUsize>,
+    /// How the request ended when the channel closed under it.
+    fate: Fate,
     deadline: Instant,
     cancel: CancellationToken,
     stop: fn(&Response) -> bool,
@@ -621,23 +728,24 @@ impl Call {
             }
             () = tokio::time::sleep_until(self.deadline) => {
                 self.finish();
-                self.process.kill_and_wait().await;
+                let reason = Failure::Interrupted(format!(
+                    "restarted because another request took longer than {} ms",
+                    self.inner.spec.timeout.as_millis()
+                ));
+                self.process.stop(reason).await;
                 Some(Step::Failed(Failure::Timeout(self.inner.spec.timeout)))
             }
-            step = self.answers.recv() => match step {
-                Some(Step::Message(response)) => {
+            answer = self.answers.recv() => match answer {
+                Some((response, size)) => {
+                    self.pending.fetch_sub(size, Ordering::SeqCst);
                     if (self.stop)(&response) {
                         self.finish();
                     }
                     Some(Step::Message(response))
                 }
-                Some(Step::Failed(failure)) => {
-                    self.finish();
-                    Some(Step::Failed(failure))
-                }
                 None => {
                     self.finish();
-                    None
+                    lock(&self.fate).take().map(Step::Failed)
                 }
             },
         }
@@ -800,6 +908,51 @@ mod tests {
         let w = watch(IDLE);
         tokio::time::sleep(IDLE + Duration::from_millis(10)).await;
         assert!(!w.activity.enter());
+    }
+
+    #[tokio::test]
+    async fn a_request_that_cannot_register_waits_for_the_exit_and_uses_a_new_process() {
+        let Some(python) = crate::script::testutil::python() else {
+            eprintln!("skipped: no python3 or python on PATH");
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        crate::script::testutil::write_script(
+            dir.path(),
+            "import json, sys\nopen('runs', 'a').write('x\\n')\nfor line in sys.stdin:\n\
+             \x20   r = json.loads(line)\n\
+             \x20   print(json.dumps({'id': r['id'], 'type': 'items', 'done': True, \
+             'items': [{'id': 't', 'title': r['text']}]}), flush=True)\n",
+        );
+        let runtime = ScriptRuntime {
+            command: vec![python.to_owned(), "main.py".to_owned()],
+            long_running: true,
+            timeout_ms: 10_000,
+            idle_timeout_ms: 600_000,
+        };
+        let session = Session::new("demo", dir.path().to_path_buf(), &runtime);
+        let ask = |text: &str| {
+            session.query("search", text, BTreeMap::new(), CancellationToken::new()).collect()
+        };
+        let events: Vec<Event> = ask("a").await;
+        assert!(matches!(events.as_slice(), [Event::Items(_)]));
+
+        // As if the supervisor were just failing the waiters: the process takes no request, and
+        // it is gone a moment later.
+        let old = lock(&session.inner.process).clone().unwrap();
+        *lock(&old.waiting) = None;
+        let kill = old.kill.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            kill.cancel();
+        });
+        let events: Vec<Event> = ask("b").await;
+        let [Event::Items(items)] = events.as_slice() else { panic!("{events:?}") };
+        assert_eq!(items[0].title, "b");
+        assert!(old.exited.is_cancelled());
+        let runs = std::fs::read_to_string(dir.path().join("runs")).unwrap();
+        assert_eq!(runs.lines().count(), 2, "the request went to a new process");
+        assert!(!session.is_failed(), "a deliberate kill is no crash");
     }
 
     #[tokio::test(start_paused = true)]

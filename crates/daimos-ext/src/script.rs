@@ -11,7 +11,7 @@ use daimos_core::model::{self, ItemBatch};
 use daimos_core::provider::QueryContext;
 use futures::StreamExt;
 use futures::stream::{self, BoxStream};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdout, Command};
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
@@ -38,6 +38,99 @@ const LOG_LIMIT: u64 = 1024 * 1024;
 /// Queries are debounced: the script starts this long after the last keystroke.
 pub const DEBOUNCE: Duration = Duration::from_millis(150);
 
+/// The longest line a script may write to stdout; a longer one ends the process with a
+/// [`Failure::Protocol`], before more of it is buffered.
+pub const MAX_LINE: usize = 4 * 1024 * 1024;
+
+/// The longest stderr line that is kept; the rest of a longer line is dropped unread.
+pub const MAX_STDERR_LINE: usize = 64 * 1024;
+
+/// Waits longer than this are cut to it, so a deadline never overflows.
+const MAX_WAIT: Duration = Duration::from_secs(365 * 24 * 3600);
+
+/// The instant `duration` from now; durations beyond a year count as a year.
+pub(crate) fn deadline_after(duration: Duration) -> Instant {
+    Instant::now() + duration.min(MAX_WAIT)
+}
+
+/// The protocol failure of a stdout line longer than [`MAX_LINE`].
+pub(crate) fn line_too_long() -> Failure {
+    Failure::Protocol(format!("wrote a line longer than {} MiB", MAX_LINE / (1024 * 1024)))
+}
+
+/// One read of a [`LineReader`].
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Line {
+    /// A line without its line ending.
+    Text(Vec<u8>),
+    /// The line passed the limit; carries the first `max` bytes. The rest of it is skipped by the
+    /// next read, without being buffered.
+    TooLong(Vec<u8>),
+    /// The input has ended.
+    End,
+}
+
+/// Reads lines of at most `max` bytes: memory stays bounded whatever the other side writes.
+pub(crate) struct LineReader<R> {
+    reader: BufReader<R>,
+    max: usize,
+    buf: Vec<u8>,
+    /// The rest of a line that was too long is being thrown away.
+    skipping: bool,
+}
+
+impl<R: AsyncRead + Unpin> LineReader<R> {
+    pub(crate) fn new(reader: R, max: usize) -> Self {
+        Self { reader: BufReader::new(reader), max, buf: Vec::new(), skipping: false }
+    }
+
+    pub(crate) async fn next_line(&mut self) -> std::io::Result<Line> {
+        loop {
+            let available = self.reader.fill_buf().await?;
+            if available.is_empty() {
+                self.skipping = false;
+                if self.buf.is_empty() {
+                    return Ok(Line::End);
+                }
+                return Ok(Line::Text(strip_cr(std::mem::take(&mut self.buf))));
+            }
+            let newline = available.iter().position(|&b| b == b'\n');
+            let chunk = newline.unwrap_or(available.len());
+            let used = newline.map_or(chunk, |at| at + 1);
+            if self.skipping {
+                self.reader.consume(used);
+                self.skipping = newline.is_none();
+                continue;
+            }
+            if self.buf.len() + chunk > self.max {
+                let keep = self.max - self.buf.len();
+                self.buf.extend_from_slice(&available[..keep]);
+                self.reader.consume(used);
+                self.skipping = newline.is_none();
+                return Ok(Line::TooLong(std::mem::take(&mut self.buf)));
+            }
+            self.buf.extend_from_slice(&available[..chunk]);
+            self.reader.consume(used);
+            if newline.is_some() {
+                return Ok(Line::Text(strip_cr(std::mem::take(&mut self.buf))));
+            }
+        }
+    }
+}
+
+fn strip_cr(mut line: Vec<u8>) -> Vec<u8> {
+    if line.last() == Some(&b'\r') {
+        line.pop();
+    }
+    line
+}
+
+/// A stdout line as text; a line that is not UTF-8 is a protocol failure.
+pub(crate) fn utf8_line(line: Vec<u8>) -> Result<String, Failure> {
+    String::from_utf8(line)
+        .map_err(|_| Failure::Protocol("cannot read the output: it is not UTF-8".to_owned()))
+}
+
 /// The id of the one request a one-shot process receives.
 const REQUEST_ID: u64 = 1;
 
@@ -54,6 +147,10 @@ pub enum Failure {
     Protocol(String),
     /// A long-running process crashed too often; carries the last stderr line it wrote.
     KeepsCrashing { stderr: Option<String> },
+    /// Daimos stopped the long-running process while the request waited; says why.
+    Interrupted(String),
+    /// The request was given up; says why.
+    Dropped(String),
 }
 
 /// What a running query reports.
@@ -69,7 +166,10 @@ impl Failure {
     /// What the user reads under the error item.
     pub fn message(&self) -> String {
         match self {
-            Self::Spawn(message) | Self::Protocol(message) => message.clone(),
+            Self::Spawn(message)
+            | Self::Protocol(message)
+            | Self::Interrupted(message)
+            | Self::Dropped(message) => message.clone(),
             Self::Timeout(limit) => format!("timed out after {}", format_duration(*limit)),
             Self::Exit { stderr: Some(line), .. } => line.clone(),
             Self::Exit { code: Some(code), .. } => format!("exited with code {code}"),
@@ -220,7 +320,7 @@ impl OneShot {
             request,
             cancel,
             stop,
-            deadline: Instant::now() + self.timeout,
+            deadline: deadline_after(self.timeout),
         };
         stream::unfold(State::Start(Box::new(pending)), advance).boxed()
     }
@@ -261,7 +361,7 @@ struct Pending {
 
 struct Running {
     child: Child,
-    lines: Lines<BufReader<ChildStdout>>,
+    lines: LineReader<ChildStdout>,
     stderr: Option<JoinHandle<Option<String>>>,
     timeout: Duration,
     deadline: Instant,
@@ -303,7 +403,7 @@ async fn start(pending: Pending) -> Option<(Step, State)> {
         let _ = stdin.write_all(line.as_bytes()).await;
         let _ = stdin.flush().await;
     }
-    let stdout = child.stdout.take().map(BufReader::new)?;
+    let stdout = child.stdout.take()?;
     let stderr = child.stderr.take();
     let log = pending.spec.log.clone();
     let stderr = tokio::spawn(async move {
@@ -314,7 +414,7 @@ async fn start(pending: Pending) -> Option<(Step, State)> {
     });
     let run = Running {
         child,
-        lines: stdout.lines(),
+        lines: LineReader::new(stdout, MAX_LINE),
         stderr: Some(stderr),
         timeout: pending.spec.timeout,
         deadline: pending.deadline,
@@ -328,6 +428,13 @@ async fn start(pending: Pending) -> Option<(Step, State)> {
 /// How long stopping long-running processes (unload, reload, drop of the backend) may take before
 /// the caller goes on; the processes are killed either way.
 const STOP_WAIT: Duration = Duration::from_secs(2);
+
+/// What a custom action of a long-running script may take beyond its own `timeout_ms`: a restart
+/// backoff and an idle stop under way come first.
+const ACTION_MARGIN: Duration = Duration::from_secs(5);
+
+/// Query events forwarded from the session thread that may wait unread.
+const FORWARD_BUFFER: usize = 16;
 
 /// How a loaded script extension runs.
 #[derive(Clone)]
@@ -398,13 +505,23 @@ impl Runner {
             Self::Session { session, handle } => {
                 // The session lives on its own thread, so this works from any thread and runtime.
                 let session = session.clone();
+                let limit = session.timeout().min(MAX_WAIT) + ACTION_MARGIN;
                 let (tx, rx) = std::sync::mpsc::channel();
+                let cancel = CancellationToken::new();
+                let give_up = cancel.clone();
                 handle.spawn(async move {
-                    let outcome =
-                        session.action(&command, &item, &action, CancellationToken::new()).await;
+                    let outcome = session.action(&command, &item, &action, cancel).await;
                     let _ = tx.send(outcome);
                 });
-                rx.recv().ok()
+                // The action has its own deadline; this one only guards against a stuck thread.
+                match rx.recv_timeout(limit) {
+                    Ok(outcome) => Some(outcome),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        give_up.cancel();
+                        Some(Err(Failure::Timeout(limit)))
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => None,
+                }
             }
         };
         match outcome {
@@ -423,24 +540,29 @@ fn event_batch(extension: &str, event: Event) -> ItemBatch {
     }
 }
 
-/// Polls `events` on the runtime of `handle` and streams them to whoever polls the result.
+/// Polls `events` on the runtime of `handle` and streams them to whoever polls the result. At
+/// most [`FORWARD_BUFFER`] events wait unread; then `events` is not polled until there is room.
 /// Dropping the result drops `events` there too.
 fn on_runtime<T: Send + 'static>(
     handle: &Handle,
     mut events: BoxStream<'static, T>,
 ) -> BoxStream<'static, T> {
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, rx) = tokio::sync::mpsc::channel(FORWARD_BUFFER);
     handle.spawn(async move {
         loop {
-            tokio::select! {
+            let event = tokio::select! {
                 biased;
                 () = tx.closed() => break,
-                event = events.next() => {
-                    let Some(event) = event else { break };
-                    if tx.send(event).is_err() {
-                        break;
-                    }
-                }
+                event = events.next() => event,
+            };
+            let Some(event) = event else { break };
+            let sent = tokio::select! {
+                biased;
+                () = tx.closed() => false,
+                sent = tx.send(event) => sent.is_ok(),
+            };
+            if !sent {
+                break;
             }
         }
     });
@@ -455,6 +577,11 @@ struct SessionThread {
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
+/// Why the backend stops a session; what its waiting requests are told.
+const RELOADED: &str = "the extension was reloaded";
+const UNLOADED: &str = "the extension was unloaded";
+const CLOSING: &str = "Daimos is shutting down";
+
 impl SessionThread {
     fn start() -> std::io::Result<Self> {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
@@ -468,25 +595,38 @@ impl SessionThread {
         Ok(Self { handle, stop, thread: Some(thread) })
     }
 
-    /// Kills the processes of `sessions` and waits (at most [`STOP_WAIT`]) until they are reaped.
-    fn stop_sessions(&self, sessions: Vec<Session>) {
+    /// Whether the caller runs on the session thread itself, where waiting for it would hang.
+    fn is_current(&self) -> bool {
+        self.thread
+            .as_ref()
+            .is_some_and(|thread| thread.thread().id() == std::thread::current().id())
+    }
+
+    /// Kills the processes of `sessions` (their waiting requests fail with `reason`) and waits, at
+    /// most [`STOP_WAIT`], until they are reaped. On the session thread itself it does not wait.
+    fn stop_sessions(&self, sessions: Vec<Session>, reason: &'static str) {
         if sessions.is_empty() {
             return;
         }
         let (tx, rx) = std::sync::mpsc::channel();
         self.handle.spawn(async move {
-            let all = futures::future::join_all(sessions.iter().map(Session::shutdown));
+            let all = futures::future::join_all(sessions.iter().map(|s| s.stop(reason)));
             let _ = tokio::time::timeout(STOP_WAIT, all).await;
             let _ = tx.send(());
         });
-        let _ = rx.recv_timeout(STOP_WAIT + Duration::from_millis(500));
+        if !self.is_current() {
+            let _ = rx.recv_timeout(STOP_WAIT + Duration::from_millis(500));
+        }
     }
 }
 
 impl Drop for SessionThread {
     fn drop(&mut self) {
         self.stop.cancel();
-        if let Some(thread) = self.thread.take() {
+        // Dropped on the session thread itself, the thread ends on its own after this task.
+        if !self.is_current()
+            && let Some(thread) = self.thread.take()
+        {
             let _ = thread.join();
         }
     }
@@ -538,6 +678,31 @@ impl ScriptBackend {
         self.runners.read().unwrap_or_else(|e| e.into_inner()).get(extension).cloned()
     }
 
+    /// The runner of a loaded extension; `None` when it is not a script one.
+    fn runner_for(&self, extension: &LoadedExtension) -> Option<Runner> {
+        let manifest = &extension.manifest;
+        let name = &manifest.extension.name;
+        let script = match (&manifest.runtime.script, manifest.extension.runtime) {
+            (Some(script), Runtime::Script) => script,
+            _ => return None,
+        };
+        let log = self.data_dir.as_ref().map(|data_dir| dir::log_path_in(data_dir, name));
+        Some(if script.long_running {
+            let thread = self.session_thread()?;
+            let mut session = Session::new(name, extension.dir.clone(), script);
+            if let Some(log) = log {
+                session = session.with_log(log);
+            }
+            Runner::Session { session, handle: thread.handle.clone() }
+        } else {
+            let mut runner = OneShot::new(name, extension.dir.clone(), script);
+            if let Some(log) = log {
+                runner = runner.with_log(log);
+            }
+            Runner::OneShot(runner)
+        })
+    }
+
     fn session_thread(&self) -> Option<&SessionThread> {
         self.sessions
             .get_or_init(|| {
@@ -548,14 +713,21 @@ impl ScriptBackend {
             .as_ref()
     }
 
-    /// Removes the runner of `name`; a long-running process is killed and its state (crash count,
-    /// failed state) goes with it.
-    fn remove_runner(&self, name: &str) {
-        let removed = self.runners.write().unwrap_or_else(|e| e.into_inner()).remove(name);
+    /// Puts `runner` in place of the runner of `name` (removes it for `None`) in one step, so a
+    /// query never finds neither. A long-running process of the old runner is killed and its state
+    /// (crash count, failed state) goes with it.
+    fn swap_runner(&self, name: &str, runner: Option<Runner>, reason: &'static str) {
+        let old = {
+            let mut runners = self.runners.write().unwrap_or_else(|e| e.into_inner());
+            match runner {
+                Some(runner) => runners.insert(name.to_owned(), runner),
+                None => runners.remove(name),
+            }
+        };
         if let (Some(Runner::Session { session, .. }), Some(Some(thread))) =
-            (removed, self.sessions.get())
+            (old, self.sessions.get())
         {
-            thread.stop_sessions(vec![session]);
+            thread.stop_sessions(vec![session], reason);
         }
     }
 }
@@ -572,7 +744,7 @@ impl Drop for ScriptBackend {
             })
             .collect();
         if let Some(Some(thread)) = self.sessions.get() {
-            thread.stop_sessions(sessions);
+            thread.stop_sessions(sessions, CLOSING);
         }
     }
 }
@@ -655,33 +827,14 @@ impl Backend for ScriptBackend {
             .write()
             .unwrap_or_else(|e| e.into_inner())
             .insert(name.clone(), manifest.clone());
-        self.remove_runner(name);
-        let script = match (&manifest.runtime.script, manifest.extension.runtime) {
-            (Some(script), Runtime::Script) => script,
-            _ => return,
-        };
-        let log = self.data_dir.as_ref().map(|data_dir| dir::log_path_in(data_dir, name));
-        let runner = if script.long_running {
-            let Some(thread) = self.session_thread() else { return };
-            let mut session = Session::new(name, extension.dir.clone(), script);
-            if let Some(log) = log {
-                session = session.with_log(log);
-            }
-            Runner::Session { session, handle: thread.handle.clone() }
-        } else {
-            let mut runner = OneShot::new(name, extension.dir.clone(), script);
-            if let Some(log) = log {
-                runner = runner.with_log(log);
-            }
-            Runner::OneShot(runner)
-        };
-        self.runners.write().unwrap_or_else(|e| e.into_inner()).insert(name.clone(), runner);
+        let runner = self.runner_for(extension);
+        self.swap_runner(name, runner, RELOADED);
     }
 
     /// Forgets an extension; its long-running process is killed before this returns (or after
-    /// [`STOP_WAIT`] at the latest).
+    /// two seconds at the latest).
     fn unload(&self, name: &str) {
-        self.remove_runner(name);
+        self.swap_runner(name, None, UNLOADED);
         self.manifests.write().unwrap_or_else(|e| e.into_inner()).remove(name);
     }
 }
@@ -712,9 +865,15 @@ pub(crate) async fn pump_stderr(
         None => None,
     };
     let mut last = None;
-    let mut lines = BufReader::new(stderr).lines();
+    let mut lines = LineReader::new(stderr, MAX_STDERR_LINE);
     let mut written = 0_u64;
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let line = match lines.next_line().await {
+            Ok(Line::Text(line)) => String::from_utf8_lossy(&line).into_owned(),
+            // The kept part stands for the line; the rest is never read into memory.
+            Ok(Line::TooLong(start)) => format!("{} [cut]", String::from_utf8_lossy(&start)),
+            Ok(Line::End) | Err(_) => break,
+        };
         if let Some(open) = file.as_mut() {
             written += line.len() as u64 + 1;
             // One run cannot grow the log past the limit, however much it writes.
@@ -780,18 +939,28 @@ async fn step(mut run: Running) -> Option<(Step, State)> {
                 return Some((Step::Failed(failure), State::Done));
             }
             line = run.lines.next_line() => match line {
-                Ok(Some(line)) => match protocol::parse_line::<Response>(&line) {
-                    Ok(None) => {}
-                    Ok(Some(response)) => {
-                        run.stopping = (run.stop)(&response);
-                        return Some((Step::Message(response), State::Running(Box::new(run))));
+                Ok(Line::Text(line)) => {
+                    let parsed = utf8_line(line).and_then(|line| {
+                        protocol::parse_line::<Response>(&line)
+                            .map_err(|error| Failure::Protocol(error.to_string()))
+                    });
+                    match parsed {
+                        Ok(None) => {}
+                        Ok(Some(response)) => {
+                            run.stopping = (run.stop)(&response);
+                            return Some((Step::Message(response), State::Running(Box::new(run))));
+                        }
+                        Err(failure) => {
+                            run.kill().await;
+                            return Some((Step::Failed(failure), State::Done));
+                        }
                     }
-                    Err(error) => {
-                        run.kill().await;
-                        return Some((Step::Failed(Failure::Protocol(error.to_string())), State::Done));
-                    }
-                },
-                Ok(None) => return finish(run).await,
+                }
+                Ok(Line::TooLong(_)) => {
+                    run.kill().await;
+                    return Some((Step::Failed(line_too_long()), State::Done));
+                }
+                Ok(Line::End) => return finish(run).await,
                 Err(error) => {
                     run.kill().await;
                     let failure = Failure::Protocol(format!("cannot read the output: {error}"));
@@ -1489,6 +1658,163 @@ mod tests {
         assert_eq!(runner_debounce(&backend), Some(DEBOUNCE));
         backend.load(&install(root.path(), "python3", true, ""));
         assert_eq!(runner_debounce(&backend), None);
+    }
+
+    async fn read_all(input: &[u8], max: usize) -> Vec<Line> {
+        let mut reader = LineReader::new(input, max);
+        let mut lines = Vec::new();
+        loop {
+            let line = reader.next_line().await.unwrap();
+            let end = line == Line::End;
+            lines.push(line);
+            if end {
+                return lines;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_line_reader_splits_lines_and_strips_line_endings() {
+        let lines = read_all(b"one\r\ntwo\n\nlast", 10).await;
+        assert_eq!(
+            lines,
+            [
+                Line::Text(b"one".to_vec()),
+                Line::Text(b"two".to_vec()),
+                Line::Text(Vec::new()),
+                Line::Text(b"last".to_vec()),
+                Line::End
+            ]
+        );
+        assert_eq!(read_all(b"", 10).await, [Line::End]);
+    }
+
+    #[tokio::test]
+    async fn a_line_of_exactly_the_limit_is_kept_and_a_longer_one_is_cut() {
+        assert_eq!(read_all(b"abcd\n", 4).await, [Line::Text(b"abcd".to_vec()), Line::End]);
+        // The rest of the long line is skipped; the next line reads normally.
+        assert_eq!(
+            read_all(b"abcdefghij\nok\n", 4).await,
+            [Line::TooLong(b"abcd".to_vec()), Line::Text(b"ok".to_vec()), Line::End]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_line_that_never_ends_is_reported_as_soon_as_it_passes_the_limit() {
+        let endless = vec![b'x'; 100_000];
+        let mut reader = LineReader::new(endless.as_slice(), 10);
+        assert_eq!(reader.next_line().await.unwrap(), Line::TooLong(vec![b'x'; 10]));
+        assert_eq!(reader.next_line().await.unwrap(), Line::End);
+        assert!(reader.buf.capacity() <= 64, "the skipped part was buffered");
+    }
+
+    #[tokio::test]
+    async fn a_long_stderr_line_is_cut_in_the_log_and_the_next_line_still_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("demo.log");
+        let mut input = vec![b'a'; MAX_STDERR_LINE + 1000];
+        input.extend_from_slice(b"\nlast words\n");
+        let last = pump_stderr(input.as_slice(), Some(log.clone())).await;
+        assert_eq!(last.as_deref(), Some("last words"));
+        let written = std::fs::read_to_string(log).unwrap();
+        let first = written.lines().next().unwrap();
+        assert_eq!(first.len(), MAX_STDERR_LINE + " [cut]".len());
+        assert!(first.ends_with(" [cut]"));
+    }
+
+    #[tokio::test]
+    async fn a_one_shot_line_longer_than_the_limit_is_a_protocol_failure() {
+        let python = python_or_skip!();
+        let dir = tempfile::tempdir().unwrap();
+        write_script(
+            dir.path(),
+            &format!(
+                "{PRELUDE}sys.stdout.write('x' * (5 * 1024 * 1024))\nsys.stdout.flush()\n\
+                 time.sleep(60)\n"
+            ),
+        );
+        let started = StdInstant::now();
+        let events = collect(&runner(dir.path(), python, 30_000), "").await;
+        assert_eq!(events, [Event::Failed(line_too_long())]);
+        assert_eq!(line_too_long().message(), "wrote a line longer than 4 MiB");
+        assert!(started.elapsed() < Duration::from_secs(20));
+    }
+
+    #[test]
+    fn a_deadline_never_overflows() {
+        let far = deadline_after(Duration::MAX);
+        assert!(far > Instant::now() + Duration::from_secs(364 * 24 * 3600));
+        let near = deadline_after(Duration::from_millis(5));
+        assert!(near <= Instant::now() + Duration::from_millis(5));
+    }
+
+    #[test]
+    fn a_host_reload_swaps_the_runner_without_a_gap() {
+        let root = tempfile::tempdir().unwrap();
+        install(root.path(), "python3", true, "");
+        let backend = Arc::new(ScriptBackend::new());
+        let host = Arc::new(crate::watch::ExtensionHost::new(
+            root.path().to_path_buf(),
+            backend.clone(),
+            Arc::new(crate::registry::Registry::new()),
+        ));
+        host.reload_all();
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reloads = {
+            let (host, done) = (Arc::clone(&host), Arc::clone(&done));
+            std::thread::spawn(move || {
+                let mut count = 0;
+                while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                    host.reload("demo");
+                    count += 1;
+                }
+                count
+            })
+        };
+        let started = StdInstant::now();
+        while started.elapsed() < Duration::from_millis(300) {
+            assert!(backend.runner("demo").is_some(), "a query would find no runner");
+        }
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(reloads.join().unwrap() > 1);
+    }
+
+    #[test]
+    fn a_reload_that_renames_the_extension_drops_the_old_name() {
+        let root = tempfile::tempdir().unwrap();
+        let loaded = install(root.path(), "python3", true, "");
+        let backend = Arc::new(ScriptBackend::new());
+        let host = crate::watch::ExtensionHost::new(
+            root.path().to_path_buf(),
+            backend.clone(),
+            Arc::new(crate::registry::Registry::new()),
+        );
+        host.reload_all();
+        let path = loaded.dir.join("extension.toml");
+        let manifest = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, manifest.replace("name = \"demo\"", "name = \"renamed\"")).unwrap();
+        crate::consent::confirm(&loaded.dir).unwrap();
+        host.reload("demo");
+        assert!(backend.runner("demo").is_none());
+        assert!(backend.runner("renamed").is_some());
+    }
+
+    #[tokio::test]
+    async fn dropping_the_backend_on_its_own_session_thread_does_not_hang() {
+        let python = python_or_skip!();
+        let root = tempfile::tempdir().unwrap();
+        let backend = ScriptBackend::new();
+        backend.load(&install(root.path(), python, true, &long_running_script()));
+        let cancel = CancellationToken::new();
+        let _: Vec<_> = query_of(&backend, "warm", &cancel).collect().await;
+        let handle = backend.session_thread().unwrap().handle.clone();
+        // The last owner is a task of the session thread: stopping and joining it there would
+        // wait for itself.
+        let dropped = handle.spawn(async move { drop(backend) });
+        tokio::time::timeout(Duration::from_secs(10), dropped)
+            .await
+            .expect("the drop hung")
+            .unwrap();
     }
 
     #[test]

@@ -124,9 +124,22 @@ impl ExtensionHost {
             self.forget(key);
             return;
         }
-        // The backend drops what it knew; it learns the extension again if it loads.
-        self.unload(key);
-        match dir::load_extension(&path) {
+        // The backend drops what it knew unless the same extension loads again: then `load`
+        // replaces it in one step, so no query finds the extension missing meanwhile.
+        let loaded = dir::load_extension(&path);
+        let old_name = self
+            .registry
+            .record(key)
+            .filter(|record| record.state == crate::registry::ExtensionState::Enabled)
+            .map(|record| record.name);
+        let replaced_in_place = loaded.as_ref().is_ok_and(|extension| {
+            extension.pending().is_none()
+                && old_name.as_deref() == Some(extension.manifest.extension.name.as_str())
+        });
+        if !replaced_in_place {
+            self.unload(key);
+        }
+        match loaded {
             Ok(extension) => {
                 let manifest = &extension.manifest;
                 let clash = self.registry.list().into_iter().find(|other| {
