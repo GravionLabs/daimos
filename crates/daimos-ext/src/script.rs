@@ -49,6 +49,8 @@ pub enum Failure {
     Exit { code: Option<i32>, stderr: Option<String> },
     /// The process wrote something that is not a protocol message.
     Protocol(String),
+    /// A long-running process crashed too often; carries the last stderr line it wrote.
+    KeepsCrashing { stderr: Option<String> },
 }
 
 /// What a running query reports.
@@ -68,6 +70,8 @@ impl Failure {
             Self::Timeout(limit) => format!("timed out after {}", format_duration(*limit)),
             Self::Exit { stderr: Some(line), .. } => line.clone(),
             Self::Exit { code: Some(code), .. } => format!("exited with code {code}"),
+            Self::KeepsCrashing { stderr: Some(line) } => line.clone(),
+            Self::KeepsCrashing { stderr: None } => "restarted too often, stopped".to_owned(),
             Self::Exit { code: None, .. } => "was stopped before it finished".to_owned(),
         }
     }
@@ -465,6 +469,7 @@ impl Backend for ScriptBackend {
 pub fn failure_item(extension: &str, failure: &Failure) -> model::Item {
     let title = match failure {
         Failure::Timeout(_) => format!("{extension} took too long"),
+        Failure::KeepsCrashing { .. } => format!("{extension} keeps crashing"),
         _ => format!("{extension} failed"),
     };
     crate::provider::error_item(

@@ -298,3 +298,91 @@ async fn a_program_that_does_not_exist_is_a_spawn_failure() {
     let action = session.action("search", "i", "a", CancellationToken::new()).await;
     assert!(matches!(action, Err(Failure::Spawn(_))));
 }
+
+/// Crashes the process once and waits until the session knows.
+async fn crash(ext: &Fixture) {
+    let events = ext.ask("die").await;
+    assert!(matches!(events.as_slice(), [Event::Failed(Failure::Exit { code: Some(4), .. })]));
+}
+
+#[tokio::test]
+async fn a_crash_waits_for_the_backoff_before_the_restart() {
+    let python = python_or_skip!();
+    let ext = install(python, 10_000);
+    crash(&ext).await;
+    let started = Instant::now();
+    assert_eq!(titles(&ext.ask("back").await), ["echo back"]);
+    assert!(started.elapsed() >= Duration::from_millis(250), "{:?}", started.elapsed());
+    assert_eq!(ext.starts(), 2);
+}
+
+#[tokio::test]
+async fn three_restarts_within_a_minute_work_and_the_fourth_crash_fails_the_session() {
+    let python = python_or_skip!();
+    let ext = install(python, 10_000);
+    for restart in 1..=3 {
+        crash(&ext).await;
+        assert_eq!(titles(&ext.ask("alive").await), ["echo alive"], "restart {restart}");
+        assert_eq!(ext.starts(), restart + 1);
+    }
+    crash(&ext).await;
+
+    let starts = ext.starts();
+    for _ in 0..2 {
+        let events = ext.ask("alive").await;
+        assert_eq!(
+            events,
+            [Event::Failed(Failure::KeepsCrashing { stderr: Some("dying".to_owned()) })]
+        );
+    }
+    assert!(ext.session.is_failed());
+    let action = ext.session.action("search", "i", "star", CancellationToken::new()).await;
+    assert!(matches!(action, Err(Failure::KeepsCrashing { .. })));
+    assert_eq!(ext.starts(), starts, "a failed session must not spawn");
+}
+
+#[tokio::test]
+async fn a_new_session_after_a_reload_is_not_failed() {
+    let python = python_or_skip!();
+    let ext = install(python, 10_000);
+    for _ in 0..3 {
+        crash(&ext).await;
+        ext.ask("alive").await;
+    }
+    crash(&ext).await;
+    assert!(matches!(
+        ext.ask("x").await.as_slice(),
+        [Event::Failed(Failure::KeepsCrashing { .. })]
+    ));
+    assert!(ext.session.is_failed());
+
+    let reloaded = Session::new(
+        "echo",
+        ext.root.path().to_path_buf(),
+        &ScriptRuntime {
+            command: vec![python.to_owned(), "echo.py".to_owned(), "loop".to_owned()],
+            long_running: true,
+            timeout_ms: 10_000,
+        },
+    );
+    let events: Vec<_> = reloaded
+        .query("search", "fresh", Default::default(), CancellationToken::new())
+        .collect()
+        .await;
+    assert_eq!(titles(&events), ["echo fresh"]);
+    assert!(!reloaded.is_failed());
+}
+
+#[tokio::test]
+async fn deliberate_stops_do_not_count_as_crashes() {
+    let python = python_or_skip!();
+    let ext = install(python, 300);
+    for _ in 0..4 {
+        let events = ext.ask("hang").await;
+        assert!(matches!(events.as_slice(), [Event::Failed(Failure::Timeout(_))]), "{events:?}");
+        ext.ask("ok").await;
+        ext.session.shutdown().await;
+    }
+    assert!(!ext.session.is_failed());
+    assert_eq!(titles(&ext.ask("still fine").await), ["echo still fine"]);
+}

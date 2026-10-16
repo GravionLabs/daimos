@@ -3,10 +3,14 @@
 //! A [`Session`] starts its process on the first request and keeps it. Requests get increasing
 //! ids from one counter; the reader task routes every response line to the request with that id,
 //! so answers may arrive interleaved or out of order. A superseded query sends `cancel` to the
-//! script and ignores whatever it still answers for that id. Restarting a crashed process and
-//! stopping an idle one build on [`Session::shutdown`] and the lazy start.
+//! script and ignores whatever it still answers for that id.
+//!
+//! A process that ends on its own (exit, closed pipes, garbage on stdout) has crashed: the requests
+//! in flight fail and the next request starts a fresh process after a backoff. Too many crashes in
+//! a short time put the session in a failed state until a new session replaces it. A process the
+//! session stops itself (timeout kill, [`Session::shutdown`], drop) never counts.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,6 +28,43 @@ use tokio_util::sync::CancellationToken;
 use crate::manifest::ScriptRuntime;
 use crate::protocol::{self, Request, Response};
 use crate::script::{Event, Failure, OneShot, STDERR_GRACE, pump_stderr};
+
+/// The first restart waits this long; every further restart within the window doubles it.
+const BACKOFF: Duration = Duration::from_millis(250);
+/// Restarts allowed within [`WINDOW`]; the crash after that fails the session.
+const MAX_RESTARTS: usize = 3;
+/// The rolling window the restarts are counted in.
+const WINDOW: Duration = Duration::from_secs(60);
+
+/// The restart bookkeeping of a session: when the next start may happen and whether the process
+/// crashes too often to be started again.
+#[derive(Default)]
+struct Health {
+    /// When the restarts happened, oldest first; only those within [`WINDOW`] matter.
+    restarts: VecDeque<Instant>,
+    /// The next process may start no earlier than this.
+    ready_at: Option<Instant>,
+    /// Set by the crash that exceeded the limit; carries the last stderr line.
+    failed: Option<Option<String>>,
+}
+
+impl Health {
+    /// Records a crash at `at`: schedules the restart or, past the limit, fails for good.
+    fn crashed(&mut self, at: Instant, stderr: Option<String>) {
+        if self.failed.is_some() {
+            return;
+        }
+        while self.restarts.front().is_some_and(|&t| at.saturating_duration_since(t) >= WINDOW) {
+            self.restarts.pop_front();
+        }
+        if self.restarts.len() >= MAX_RESTARTS {
+            self.failed = Some(stderr);
+            return;
+        }
+        self.ready_at = Some(at + BACKOFF * (1 << self.restarts.len()));
+        self.restarts.push_back(at);
+    }
+}
 
 /// What a request hears from the process.
 enum Step {
@@ -47,6 +88,8 @@ struct Process {
     kill: CancellationToken,
     /// Fires once the child is reaped and every waiting request has been told.
     exited: CancellationToken,
+    /// Set (before `exited` fires) when the process ended without being asked to: when and why.
+    crash: Arc<Mutex<Option<(Instant, Failure)>>>,
 }
 
 impl Process {
@@ -64,6 +107,7 @@ impl Process {
         let (lines, mut outgoing) = mpsc::unbounded_channel::<String>();
         let kill = CancellationToken::new();
         let exited = CancellationToken::new();
+        let crash = Arc::new(Mutex::new(None));
 
         // The writer is a task of its own, so a script that is busy writing never blocks on us.
         let stop = kill.clone();
@@ -88,8 +132,9 @@ impl Process {
             Arc::clone(&waiting),
             kill.clone(),
             exited.clone(),
+            Arc::clone(&crash),
         ));
-        Ok(Arc::new(Self { lines, waiting, kill, exited }))
+        Ok(Arc::new(Self { lines, waiting, kill, exited, crash }))
     }
 
     /// Registers request `id`; `None` when the process has already ended.
@@ -132,11 +177,14 @@ async fn supervise(
     waiting: Arc<Waiting>,
     kill: CancellationToken,
     exited: CancellationToken,
+    crash: Arc<Mutex<Option<(Instant, Failure)>>>,
 ) {
+    let mut deliberate = false;
     let mut failure = loop {
         tokio::select! {
             biased;
             () = kill.cancelled() => {
+                deliberate = true;
                 let _ = child.kill().await;
                 break Failure::Exit { code: None, stderr: None };
             }
@@ -173,6 +221,9 @@ async fn supervise(
         *last =
             tokio::time::timeout(STDERR_GRACE, handle).await.ok().and_then(Result::ok).flatten();
     }
+    if !deliberate {
+        *lock(&crash) = Some((Instant::now(), failure.clone()));
+    }
     kill.cancel();
     let waiters = lock(&waiting).take().unwrap_or_default();
     for sender in waiters.into_values() {
@@ -194,6 +245,7 @@ struct Inner {
     /// The last id handed out; one counter for the whole session, across process restarts.
     last_id: AtomicU64,
     process: Mutex<Option<Arc<Process>>>,
+    health: Mutex<Health>,
 }
 
 impl Inner {
@@ -224,7 +276,12 @@ impl Session {
 
     fn from_runner(spec: OneShot) -> Self {
         Self {
-            inner: Arc::new(Inner { spec, last_id: AtomicU64::new(0), process: Mutex::new(None) }),
+            inner: Arc::new(Inner {
+                spec,
+                last_id: AtomicU64::new(0),
+                process: Mutex::new(None),
+                health: Mutex::default(),
+            }),
         }
     }
 
@@ -237,6 +294,12 @@ impl Session {
         lock(&self.inner.process).as_ref().is_some_and(|p| !p.exited.is_cancelled())
     }
 
+    /// Whether the process crashed too often (noticed by the next request): no more starts, every request fails with
+    /// [`Failure::KeepsCrashing`]. A new session starts clean.
+    pub fn is_failed(&self) -> bool {
+        lock(&self.inner.health).failed.is_some()
+    }
+
     /// Kills the process (if any) and waits until it is reaped. The next request starts a new one.
     pub async fn shutdown(&self) {
         let process = lock(&self.inner.process).take();
@@ -245,20 +308,45 @@ impl Session {
         }
     }
 
-    /// The live process, started if there is none.
-    fn process(&self) -> Result<Arc<Process>, Failure> {
-        let mut slot = lock(&self.inner.process);
-        if let Some(process) = slot.as_ref().filter(|p| !p.exited.is_cancelled()) {
-            return Ok(Arc::clone(process));
+    /// The live process, started if there is none. A process that crashed since the last call is
+    /// counted first; the start waits for its backoff.
+    async fn process(&self) -> Result<Arc<Process>, Failure> {
+        loop {
+            let wait_until = {
+                let mut slot = lock(&self.inner.process);
+                let mut health = lock(&self.inner.health);
+                if slot.as_ref().is_some_and(|p| p.exited.is_cancelled())
+                    && let Some(process) = slot.take()
+                    && let Some((at, failure)) = lock(&process.crash).take()
+                {
+                    let stderr = match failure {
+                        Failure::Exit { stderr, .. } => stderr,
+                        other => Some(other.message()),
+                    };
+                    health.crashed(at, stderr);
+                }
+                if let Some(stderr) = &health.failed {
+                    return Err(Failure::KeepsCrashing { stderr: stderr.clone() });
+                }
+                if let Some(process) = slot.as_ref() {
+                    return Ok(Arc::clone(process));
+                }
+                match health.ready_at.filter(|&t| t > Instant::now()) {
+                    Some(at) => at,
+                    None => {
+                        let process = Process::start(&self.inner.spec)?;
+                        *slot = Some(Arc::clone(&process));
+                        return Ok(process);
+                    }
+                }
+            };
+            tokio::time::sleep_until(wait_until).await;
         }
-        let process = Process::start(&self.inner.spec)?;
-        *slot = Some(Arc::clone(&process));
-        Ok(process)
     }
 
     /// Sends the request built by `build` (given its fresh id) and returns the call that waits for
     /// the answer. `stop` says which response ends it.
-    fn begin(
+    async fn begin(
         &self,
         build: impl Fn(u64) -> Request,
         cancel: CancellationToken,
@@ -266,7 +354,7 @@ impl Session {
     ) -> Result<Call, Failure> {
         // A process that ended between the lookup and the registration is replaced once.
         for _ in 0..2 {
-            let process = self.process()?;
+            let process = self.process().await?;
             let id = self.inner.next_id();
             if let Some(answers) = process.register(id) {
                 process.send(&build(id));
@@ -311,16 +399,19 @@ impl Session {
                 if cancel.is_cancelled() {
                     return None;
                 }
-                let begun = state.session.begin(
-                    |id| Request::Query {
-                        id,
-                        command: command.clone(),
-                        text: text.clone(),
-                        preferences: preferences.clone(),
-                    },
-                    cancel,
-                    |response| matches!(response, Response::Items { done: true, .. }),
-                );
+                let begun = state
+                    .session
+                    .begin(
+                        |id| Request::Query {
+                            id,
+                            command: command.clone(),
+                            text: text.clone(),
+                            preferences: preferences.clone(),
+                        },
+                        cancel,
+                        |response| matches!(response, Response::Items { done: true, .. }),
+                    )
+                    .await;
                 match begun {
                     Ok(call) => state.call = Some(call),
                     Err(failure) => return Some((Event::Failed(failure), state)),
@@ -353,16 +444,18 @@ impl Session {
         if cancel.is_cancelled() {
             return Ok(None);
         }
-        let mut call = self.begin(
-            |id| Request::Action {
-                id,
-                command: command.to_owned(),
-                item: item.to_owned(),
-                action: action.to_owned(),
-            },
-            cancel,
-            |response| matches!(response, Response::Result { .. }),
-        )?;
+        let mut call = self
+            .begin(
+                |id| Request::Action {
+                    id,
+                    command: command.to_owned(),
+                    item: item.to_owned(),
+                    action: action.to_owned(),
+                },
+                cancel,
+                |response| matches!(response, Response::Result { .. }),
+            )
+            .await?;
         let mut toast = None;
         while let Some(step) = call.next().await {
             match step {
@@ -444,5 +537,57 @@ impl Call {
 impl Drop for Call {
     fn drop(&mut self) {
         self.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn health_after(crashes: &[u64]) -> (Health, Instant) {
+        let base = Instant::now();
+        let mut health = Health::default();
+        for &secs in crashes {
+            health.crashed(base + Duration::from_secs(secs), Some(format!("at {secs}")));
+        }
+        (health, base)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backoff_doubles_with_every_restart_in_the_window() {
+        let base = Instant::now();
+        let mut health = Health::default();
+        for (second, delay_ms) in [(0, 250), (1, 500), (2, 1000)] {
+            let at = base + Duration::from_secs(second);
+            health.crashed(at, None);
+            assert_eq!(health.ready_at, Some(at + Duration::from_millis(delay_ms)));
+            assert!(health.failed.is_none());
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_fourth_crash_within_a_minute_fails_with_the_last_stderr_line() {
+        let (health, _) = health_after(&[0, 10, 20, 30]);
+        assert_eq!(health.failed, Some(Some("at 30".to_owned())));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_window_slides_so_old_crashes_expire() {
+        // The first restart is 60 s old at the fourth crash: it no longer counts.
+        let (health, base) = health_after(&[0, 10, 20, 60]);
+        assert!(health.failed.is_none());
+        assert_eq!(health.restarts.len(), 3);
+        // Backoff restarts from the start of the sequence for the two that remain.
+        assert_eq!(health.ready_at, Some(base + Duration::from_secs(60) + BACKOFF * 4));
+        // 59 s after the first restart it still counts.
+        let (health, _) = health_after(&[0, 10, 20, 59]);
+        assert!(health.failed.is_some());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_failed_session_stays_failed() {
+        let (mut health, base) = health_after(&[0, 1, 2, 3]);
+        health.crashed(base + Duration::from_secs(1000), Some("later".to_owned()));
+        assert_eq!(health.failed, Some(Some("at 3".to_owned())));
     }
 }
