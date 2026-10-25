@@ -4,3 +4,6 @@ target
 pnpm-lock.yaml
 CHANGELOG.md
 src-tauri/gen
+.claude
+apm.lock.yaml
+.worktrees
