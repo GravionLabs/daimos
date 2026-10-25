@@ -13,3 +13,6 @@ coverage/
 !/.vscode/extensions.json
 docs-site/dist/
 docs-site/.astro/
+
+# APM dependencies
+apm_modules/
