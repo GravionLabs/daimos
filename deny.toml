@@ -14,6 +14,12 @@ ignore = [
   { id = "RUSTSEC-2024-0423", reason = "same crate family (gtk-layer-shell-sys)" },
   # paste is a proc macro used by specta; it only runs at compile time and has no replacement there.
   { id = "RUSTSEC-2024-0436", reason = "compile-time proc macro of specta, no runtime code" },
+  # zbus, zvariant and zvariant_derive moved into zbus 6; zbus_names, zvariant and zvariant_derive 5.x are
+  # flagged as unmaintained. zbus 5 is pulled in by ashpd and tauri-plugin-single-instance, so there is no
+  # upgrade on our side. Revisit when both move to zbus 6.
+  { id = "RUSTSEC-2026-0370", reason = "zvariant 5.x via zbus 5 (ashpd, tauri-plugin-single-instance); no safe upgrade yet" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names 4.x via zbus 5; same exit as RUSTSEC-2026-0370" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive 5.x via zbus 5; same exit as RUSTSEC-2026-0370" },
 ]
 
 [licenses]
