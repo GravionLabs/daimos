@@ -43,6 +43,8 @@ forms). Write them in US English.
 **Definition of ready:** a PBI or task can be started when it has no `needs-refinement` or
 `needs-decision` label and nothing it is blocked by is still open.
 
+**Enforcement:** the `Issues` workflow (`.github/workflows/issues.yml`, the shared `issues.yml` of GravionLabs/ci) fixes the title prefix and labels PBIs and tasks that miss required sections with `needs-refinement`. The required sections are set in that workflow.
+
 ## Verification
 
 From the repo root, unless a PBI says otherwise:
